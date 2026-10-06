@@ -3,7 +3,8 @@
 Roles: player, certified_coach, admin. Server-side XP/Elo, ranked open-play queue, daily quests,
 coach-verified homework and skill badges, tier gates. Data lives in Netlify Blobs.
 
-Deploy: push this folder to GitHub / Netlify. Set env ADMIN_PASSWORD (first admin user is "admin").
+Deploy: push this folder to GitHub / Netlify. Set env ADMIN_PASSWORD before first use (the first admin user is "admin";
+since v7.2 there is no fallback password, so a fresh deploy has no admin until it is set).
 Admin tab: set courts, geofence (lat/lng/radius), invite coaches (token) or set roles.
 
 v6.2 notes: passwords are scrypt-hashed server-side (old SHA hashes upgrade on next login), login is rate limited
@@ -20,3 +21,9 @@ v6.9 (concurrency): every shared record (matches, queue, bookings, sessions, hom
 
 v7.0 (performance pass): admin bootstrap runs once per instance instead of on every login; state polls reuse the already-loaded user and config (2 fewer blob reads per poll); name lookups share in-flight reads; rate-limit checks and hits run in parallel; client skips re-rendering when a poll returns unchanged state (no flicker, less DOM work), pauses polling while offline, and preconnects to font hosts.
 v7.1: new players (and existing players once) complete a 6-trait skill survey before using the app; the Me tab shows a Skill Trait Gram (radar chart). Self-assessed, stored on the user record, retake allowed every 14 days. It does not change Elo, XP or tiers.
+v7.2 (audit pass, see AUDIT.md): no default admin/admin; reserved names (admin, root, staff...) can't be registered; sign-up limit 40/hour per IP so a launch night on club Wi-Fi works; matchmaking fills every free court and, after 10 min, lets a short tier borrow players from one adjacent tier (never Beginner with Advanced); queued players' polls run matchmaking; coach student rosters survive booking-log trimming; logs trim dead records first; quests shuffle daily over 10 drills; admin can reset a forgotten password (temporary password, sessions revoked, lockout cleared); UI blocks double-submits, confirms destructive taps, one-tap student check-in, queue wait time, offline message, accessibility fixes; QR library served from /vendor (no third-party script host); CSP, HSTS and Permissions-Policy headers.
+
+## Tests
+`npm install && npm test` (Node 20.6+). 23 tests run against an in-memory Netlify Blobs mock, so no Netlify account is needed:
+API scenarios (auth, ranked queue, scoring, disputes, coaching, bookings, quests, concurrency) and jsdom UI smoke tests of public/index.html.
+

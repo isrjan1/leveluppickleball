@@ -319,7 +319,7 @@ async function handle(req, context) {
     if (await locked(s, k, 8, 9e5)) return E("Too many attempts", 429);
     if (np.length < 6 || np.length > 128) return E("Use 6 to 128 characters");
     if (!(await verify(s, me, String(b.oldPw || "")))) { await hit(s, k, 9e5); return E("wrong password"); }
-    let nu; await mutU(s, me.id, async u => { u.tv = (u.tv | 0) + 1; u.defaultPw = false; await setPw(u, np); nu = u; });
+    let nu; await mutU(s, me.id, async u => { u.tv = (u.tv | 0) + 1; u.defaultPw = false; u.mustChange = false; await setPw(u, np); nu = u; });
     return J({ token: await token(s, nu), ...(await snapshot(s, nu, { ...DEF, ...(await jget(s, "cfg", {})) }, !!b.full)), msg: "Password changed" });
   }
 
@@ -524,6 +524,14 @@ async function handle(req, context) {
     await mutU(s, id, u => { u.disabled = !!b.disabled; }); await coaches(s, true);
     await mutate(s, "q", [], q => q.filter(x => x.id !== id));
     return ok(b.disabled ? "User disabled" : "User enabled");
+  }
+  if (a === "resetPw") { // forgotten password: admin issues a temporary one, all of that user's sessions end
+    const id = String(b.id || "");
+    if (id === me.id) return E("Use Change password on the Me tab for your own account");
+    const tmp = randomBytes(6).toString("base64url").replace(/[-_]/g, "x");
+    let name; await mutU(s, id, async u => { u.tv = (u.tv | 0) + 1; u.mustChange = true; await setPw(u, tmp); name = u.username; });
+    await s.delete(rk("u:" + name.toLowerCase())); // clear any login lockout for that name
+    return ok(`Temporary password for ${name}: ${tmp}`);
   }
   if (a === "voidMatch") {
     await mutate(s, "m", [], ms => { const m = ms.find(x => x.id === b.matchId && x.status !== "done"); if (!m) throw new Bad("invalid"); m.status = "done"; m.void = true; m.end = Date.now(); });

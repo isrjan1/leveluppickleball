@@ -135,3 +135,20 @@ test("simultaneous joins start exactly one match; simultaneous confirmations pay
   const xp = (await Promise.all(ts.map(t => c.ok("state", {}, t)))).map(s => s.me.xp).sort();
   assert.deepEqual(xp, [10, 10, 30, 30]);
 });
+
+test("admin can reset a forgotten password: old sessions end, temp password works once changed", async () => {
+  const c = await fresh(ADMIN);
+  const at = (await c.ok("login", { username: "admin", password: ADMIN.ADMIN_PASSWORD })).token;
+  const t = await c.register("forgetful", ip());
+  for (let i = 0; i < 8; i++) await c.call("login", { username: "forgetful", password: "guess" + i }); // locked out
+  const id = (await c.ok("state", {}, t)).me.id;
+  const r = await c.ok("resetPw", { id }, at);
+  const tmp = r.msg.split(": ").pop();
+  assert.equal((await c.call("state", {}, t)).status, 401, "old session revoked");
+  const nt = (await c.ok("login", { username: "forgetful", password: tmp })).token; // lockout cleared
+  assert.equal((await c.ok("state", {}, nt)).me.mustChange, true);
+  const ct = (await c.ok("changePw", { oldPw: tmp, newPw: "brandnew1" }, nt)).token;
+  assert.equal((await c.ok("state", {}, ct)).me.mustChange, false);
+  assert.equal((await c.call("resetPw", { id }, t)).status, 401);
+  assert.equal((await c.call("resetPw", { id }, ct)).status, 403, "players can't reset passwords");
+});

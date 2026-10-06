@@ -12,9 +12,9 @@ async function until(fn, what, ms = 3000) {
   throw new Error("timed out waiting for " + what);
 }
 
-async function openApp(c, { token, confirmAnswer = true, failFetch = false } = {}) {
+async function openApp(c, { token, confirmAnswer = true, failFetch = false, html = HTML } = {}) {
   const calls = [];
-  const dom = new JSDOM(HTML, {
+  const dom = new JSDOM(html, {
     url: "https://club.test/", runScripts: "dangerously", pretendToBeVisual: true,
     beforeParse(w) {
       if (token) w.localStorage.setItem("pt", token);
@@ -91,5 +91,29 @@ test("network failure shows a human message instead of 'Failed to fetch'", async
   app.click("[data-a=auth]");
   await until(() => app.$(".toast"), "toast");
   assert.match(app.$(".toast").textContent, /reach the server|offline/);
+  app.close();
+});
+
+test("admin check-in screen draws the QR code locally and a player can check in with it", async () => {
+  const c = await fresh({ ADMIN_PASSWORD: "x-admin-pw" });
+  const at = (await c.ok("login", { username: "admin", password: "x-admin-pw" })).token;
+  await c.ok("setCfg", { qr: true, courts: "Court 1", rad: 150, minMin: 5, tz: "UTC" }, at);
+  // jsdom doesn't fetch script files, so inline the vendored library in place of its <script src>
+  const lib = readFileSync(new URL("../public/vendor/qrcode.min.js", import.meta.url), "utf8");
+  const html = HTML.replace(/<script src="vendor\/qrcode\.min\.js"[^>]*><\/script>/, () => `<script>${lib}</script>`);
+  assert.notEqual(html, HTML, "page loads the vendored QR library");
+  assert.ok(!/cdnjs|unpkg|jsdelivr/.test(HTML), "no third-party script hosts");
+  const app = await openApp(c, { token: at, html });
+  await until(() => app.$("[data-v=admin]"), "admin tab");
+  app.click("[data-a=tab][data-v=admin]");
+  await until(() => app.$("[data-a=qrOn]"), "show code button");
+  app.click("[data-a=qrOn]");
+  await until(() => app.$("#qrbox")?.firstChild, "QR drawn");
+  const code = app.$("#qrbox").parentElement.querySelector(".big").textContent.trim();
+  assert.match(code, /^[A-Z0-9]{8}$/);
+  const p = await c.register("qrplayer", "198.51.100.4");
+  assert.equal((await c.call("checkin", { code: "WRONG123" }, p)).status, 400);
+  await c.ok("checkin", { code }, p);
+  assert.equal((await c.ok("state", {}, p)).checked, true);
   app.close();
 });

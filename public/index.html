@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Pickleball Level Up</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer onload="typeof draw==='function'&&draw(true)"></script>
+<script src="vendor/qrcode.min.js" defer onload="typeof draw==='function'&&draw(true)"></script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg">
 <meta name="theme-color" content="#06140c">
@@ -86,7 +86,7 @@ async function run(action,d){
   draw();ciPending();
 }
 let toastT,seq=0;
-function say(m,bad){toast=m?(bad?"! ":"")+m:"";clearTimeout(toastT);if(m)toastT=setTimeout(()=>{toast="";const t=document.querySelector(".toast");if(t)t.remove()},m.startsWith("Invite")?60000:3500)}
+function say(m,bad){toast=m?(bad?"! ":"")+m:"";clearTimeout(toastT);if(m)toastT=setTimeout(()=>{toast="";const t=document.querySelector(".toast");if(t)t.remove()},/^(Invite|Temporary password)/.test(m)?60000:3500)}
 let lastJ="";
 async function load(poll){const n=++seq;let same=false;try{const j=await api("state");if(n===seq){const k=JSON.stringify({...j,msg:0});same=poll&&k===lastJ;lastJ=k;S=j}}catch(e){}if(!same)draw(poll);ciPending()}
 // a facility QR scanned before logging in is kept until the app is free to check the player in
@@ -138,6 +138,7 @@ const A={
   pw:async()=>{const n=v("np");if(n.length<6){say("Use 6+ characters",1);return draw()}
     await run("changePw",{oldPw:v("op"),newPw:n});["op","np"].forEach(i=>{const e=document.getElementById(i);if(e)e.value=""})},
   setDisabled:x=>{const u=(S.admin.users||[]).find(u=>u.id===x);if(u&&(u.disabled||ask(`Disable ${u.username}? They will be logged out and removed from the queue.`)))run("setDisabled",{id:x,disabled:!u.disabled})},
+  resetPw:x=>{const u=(S.admin.users||[]).find(u=>u.id===x);if(u&&ask(`Reset ${u.username}'s password? They'll be logged out and need the temporary password you'll see next.`))run("resetPw",{id:x})},
   voidMatch:x=>ask("Void this match? No XP or Elo will be awarded.")&&run("voidMatch",{matchId:x}),invite:()=>run("invite"),redeem:()=>run("redeem",{token:v("tk")}),
   logout:()=>{T=null;S=null;showQr=false;calDay=null;tab="play";localStorage.removeItem("pt");draw()},auth,
   mode:()=>{authMode=authMode==="login"?"reg":"login";draw()},
@@ -228,7 +229,7 @@ function admin(){
   <div class="win"><h2>Coach invites</h2><button class="btn" data-a="invite">New invite token</button>${a.cfg.inv.map(t=>`<div class="row m">${t}</div>`).join("")}<p class="m">Single-use. Give to a verified coach.</p></div>
   <div class="win"><h2>Users</h2>${opts(a.users||[],u=>`<div class="row"><div class="g1">${esc(u.username)}${u.disabled?" (disabled)":""}<div class="m">Elo ${u.elo}, ${u.xp} XP</div></div>
   <select id="r${u.id}">${opts(["player","certified_coach","admin"],r=>`<option ${r===u.role?"selected":""}>${r}</option>`)}</select>
-  <button class="btn g" data-a="setRole" data-v="${u.id}">Set</button><button class="btn g" data-a="resetElo" data-v="${u.id}">Reset rank</button><button class="btn g" data-a="setDisabled" data-v="${u.id}">${u.disabled?"Enable":"Disable"}</button></div>`)}</div>`;
+  <button class="btn g" data-a="setRole" data-v="${u.id}">Set</button><button class="btn g" data-a="resetElo" data-v="${u.id}">Reset rank</button><button class="btn g" data-a="setDisabled" data-v="${u.id}">${u.disabled?"Enable":"Disable"}</button>${u.id===S.me.id?"":`<button class="btn g" data-a="resetPw" data-v="${u.id}">Reset password</button>`}</div>`)}</div>`;
 }
 function draw(poll){
   const el=$("#app"),f=document.activeElement;
@@ -244,7 +245,7 @@ function draw(poll){
   if(r!=="player")tabs.push(["coach","Coach"]);if(r==="admin")tabs.push(["admin","Admin"]);
   if(!tabs.some(t=>t[0]===tab))tab="play";
   const need=r==="player"&&(!S.me.sk||rtk);const body=need?survey():{play,quests,cal,me,board,coach,admin}[tab]();
-  el.innerHTML=`<div class="top"><b>${esc(S.me.username)}</b><span class="tag">${r.replace("_"," ")}</span></div>${S.me.defaultPw?`<div class="win err">Change the default admin password on the Me tab.</div>`:""}${body}
+  el.innerHTML=`<div class="top"><b>${esc(S.me.username)}</b><span class="tag">${r.replace("_"," ")}</span></div>${S.me.defaultPw?`<div class="win err">Change the default admin password on the Me tab.</div>`:S.me.mustChange?`<div class="win err">You're using a temporary password. Set your own on the Me tab.</div>`:""}${body}
   <nav class="tabs" aria-label="Sections"${need?" hidden":""}>${tabs.map(([k,n])=>`<button class="${k===tab?"on":""}"${k===tab?' aria-current="page"':""} data-a="tab" data-v="${k}">${n}</button>`).join("")}</nav>${tt}`;
   rest();
   if(showQr&&tab==="admin"&&window.QRCode){const q=document.getElementById("qrbox");if(q&&!q.firstChild)new QRCode(q,{text:qrText,width:200,height:200})}
