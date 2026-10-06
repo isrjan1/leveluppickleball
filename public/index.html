@@ -43,7 +43,7 @@ input.s{width:64px}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(72px + env(safe-area-inset-bottom,0px));background:var(--text);color:var(--bg);padding:8px 14px;max-width:90%;z-index:9}
 .vs{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;text-align:center;align-items:center;margin:8px 0}
 .err{color:var(--danger)}
-body.busy .app [data-a]:not([data-a=tab]){opacity:.6;pointer-events:none}
+body.busy .app [data-a]:not([data-a=tab]):not([data-a=logout]):not([data-a=qrOff]):not([data-a=day]):not([data-a=mode]):not([data-a=ics]):not([data-a=rt]):not([data-a=svx]){opacity:.6;pointer-events:none}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .days{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:6px}
 .days button{flex:none;min-width:48px;background:var(--panel2);border:1px solid var(--line);padding:4px 6px;display:flex;flex-direction:column;align-items:center}
@@ -57,8 +57,11 @@ const $=s=>document.querySelector(s);
 let T=localStorage.getItem("pt"),S=null,tab="play",toast="",authMode="login",qrText="",qrCode="",showQr=false,calDay=null;
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 async function api(action,d={}){
-  let r;try{r=await fetch("/api",{method:"POST",headers:{"content-type":"application/json",authorization:"Bearer "+(T||"")},body:JSON.stringify({action,full:tab==="admin",...d})})}
-  catch(e){throw new Error(navigator.onLine?"Can't reach the server. Try again in a moment.":"You're offline. Check your connection and try again.")}
+  // 20s timeout: a request stuck on a weak connection must not leave the app locked
+  let r;const ac=new AbortController(),to=setTimeout(()=>ac.abort(),20000);
+  try{r=await fetch("/api",{method:"POST",signal:ac.signal,headers:{"content-type":"application/json",authorization:"Bearer "+(T||"")},body:JSON.stringify({action,full:tab==="admin",...d})})}
+  catch(e){throw new Error(!navigator.onLine?"You're offline. Check your connection and try again.":e.name==="AbortError"?"The server took too long. Try again.":"Can't reach the server. Try again in a moment.")}
+  finally{clearTimeout(to)}
   const j=await r.json().catch(()=>({}));
   if(!r.ok){if(r.status===401&&T){T=null;localStorage.removeItem("pt")}throw new Error(j.error||"Error")}
   return j;
@@ -79,11 +82,11 @@ const ago=t=>Math.max(0,Math.round((Date.now()-t)/6e4));
 let busy=false;
 const setBusy=b=>{busy=b;document.body.classList.toggle("busy",b)};
 async function run(action,d){
-  if(busy)return;setBusy(true);
+  if(busy)return false;setBusy(true);
   try{const j=await api(action,d);if(j.token){T=j.token;localStorage.setItem("pt",T)}if(j.me){seq++;S=j;say(j.msg||"")}else{await load();return}}
   catch(e){say(e.message,1)}
   finally{setBusy(false)}
-  draw();ciPending();
+  draw();ciPending();return true;
 }
 let toastT,seq=0;
 function say(m,bad){toast=m?(bad?"! ":"")+m:"";clearTimeout(toastT);if(m)toastT=setTimeout(()=>{toast="";const t=document.querySelector(".toast");if(t)t.remove()},/^(Invite|Temporary password)/.test(m)?60000:3500)}
@@ -122,8 +125,8 @@ function survey(){return `<div class="win"><h2>Skill survey</h2><p class="sub">R
   ${TR.map((q,i)=>`<p style="margin:12px 0 2px"><b>${q[0]}</b> <span class="m">${q[1]}</span></p><select id="sk${i}">${[1,2,3,4,5].map(n=>`<option value="${n}"${n===1?"":n===3?" selected":""}>${n}: ${q[n+1]}</option>`).join("")}</select>`).join("")}
   <p><button class="btn" data-a="sv">Save my skill profile</button>${S.me.sk?`<button class="btn g" data-a="svx">Cancel</button>`:""}</p></div>`}
 const A={
-  sv:()=>run("survey",{v:[0,1,2,3,4,5].map(i=>+v("sk"+i))}).then(()=>{if(!toast.startsWith("!"))rtk=false;draw()}),svx:()=>{rtk=false;draw()},rt:()=>{rtk=true;draw()},
-  checkin:()=>S.qr?run("checkin",{code:v("fc")}):geo(),qrOn:async()=>{showQr=true;await refreshQr()},qrOff:()=>{showQr=false;draw()},join:()=>run("join"),leave:()=>run("leave"),
+  sv:()=>run("survey",{v:[0,1,2,3,4,5].map(i=>+v("sk"+i))}).then(ran=>{if(ran&&!toast.startsWith("!"))rtk=false;draw()}),svx:()=>{rtk=false;draw()},rt:()=>{rtk=true;draw()},
+  checkin:()=>busy?0:S.qr?run("checkin",{code:v("fc")}):geo(),qrOn:async()=>{showQr=true;await refreshQr()},qrOff:()=>{showQr=false;draw()},join:()=>run("join"),leave:()=>run("leave"),
   claim:x=>run("claim",{qid:x}),book:x=>run("book",{sessionId:x}),cancel:x=>ask("Cancel this booking?")&&run("cancel",{id:x}),day:x=>{calDay=x||null;draw()},ics,ref:x=>run("ref",{id:x,ref:v("rf"+x)}),setPay:()=>run("setPay",{text:v("cp")}),
   addSession:()=>{const w=v("sw");run("addSession",{kind:v("sk"),ts:w?new Date(w).getTime():0,title:v("st"),price:+v("sp"),cap:+v("sc"),dur:+v("sd")})},
   cancelSession:x=>{const n=(S.coach.sessions.find(s=>s.id===x)||{}).booked|0;ask(n?`Cancel this session? ${n} booked player${n===1?"":"s"} will lose their spot.`:"Cancel this session?")&&run("cancelSession",{sid:x})},paid:x=>run("paid",{id:x}),
@@ -136,7 +139,7 @@ const A={
   resolve:x=>run("resolve",{matchId:x,a:+v("ra"+x),b:+v("rb"+x)}),
   setCfg:()=>run("setCfg",{qr:document.getElementById("cq").checked,tz:v("ct"),courts:v("cc"),lat:v("cl"),lng:v("cn"),rad:v("cr"),minMin:v("cm")}),
   pw:async()=>{const n=v("np");if(n.length<6){say("Use 6+ characters",1);return draw()}
-    await run("changePw",{oldPw:v("op"),newPw:n});["op","np"].forEach(i=>{const e=document.getElementById(i);if(e)e.value=""})},
+    if(!(await run("changePw",{oldPw:v("op"),newPw:n})))return;["op","np"].forEach(i=>{const e=document.getElementById(i);if(e)e.value=""})},
   setDisabled:x=>{const u=(S.admin.users||[]).find(u=>u.id===x);if(u&&(u.disabled||ask(`Disable ${u.username}? They will be logged out and removed from the queue.`)))run("setDisabled",{id:x,disabled:!u.disabled})},
   resetPw:x=>{const u=(S.admin.users||[]).find(u=>u.id===x);if(u&&ask(`Reset ${u.username}'s password? They'll be logged out and need the temporary password you'll see next.`))run("resetPw",{id:x})},
   voidMatch:x=>ask("Void this match? No XP or Elo will be awarded.")&&run("voidMatch",{matchId:x}),invite:()=>run("invite"),redeem:()=>run("redeem",{token:v("tk")}),

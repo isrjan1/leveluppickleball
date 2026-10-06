@@ -152,3 +152,36 @@ test("admin can reset a forgotten password: old sessions end, temp password work
   assert.equal((await c.call("resetPw", { id }, t)).status, 401);
   assert.equal((await c.call("resetPw", { id }, ct)).status, 403, "players can't reset passwords");
 });
+
+test("pre-v7.2 deploys still on admin/admin: refused until ADMIN_PASSWORD is set, then replaced by it", async () => {
+  const { scryptSync } = await import("node:crypto");
+  let c = await fresh(ADMIN);
+  await c.ok("login", { username: "admin", password: ADMIN.ADMIN_PASSWORD });
+  // turn the admin into a v7.1-style default account: password "admin", defaultPw: true
+  const st = __dump(), id = st.get("name/admin").v, u = JSON.parse(st.get("u/" + id).v);
+  u.salt = "legacysalt"; u.h = scryptSync("admin", u.salt, 32).toString("hex"); u.defaultPw = true;
+  st.set("u/" + id, { v: JSON.stringify(u), etag: "legacy" });
+  c = await fresh({}, { keepStore: true }); // redeploy without ADMIN_PASSWORD
+  const r = await c.call("login", { username: "admin", password: "admin" });
+  assert.equal(r.status, 503);
+  assert.match(r.body.error, /ADMIN_PASSWORD/);
+  c = await fresh({ ADMIN_PASSWORD: "now-set-pw" }, { keepStore: true }); // owner sets it and redeploys
+  assert.equal((await c.call("login", { username: "admin", password: "admin" })).status, 401);
+  const t = (await c.ok("login", { username: "admin", password: "now-set-pw" })).token;
+  assert.equal((await c.ok("state", {}, t)).me.defaultPw, false);
+});
+
+test("coaches from before v7.2 get their roster backfilled from the booking log", async () => {
+  const c = await fresh(ADMIN);
+  const at = (await c.ok("login", { username: "admin", password: ADMIN.ADMIN_PASSWORD })).token;
+  const ci = (await c.ok("invite", {}, at)).msg.replace("Invite: ", "");
+  const coach = await c.register("oldcoach", ip()); await c.ok("redeem", { token: ci }, coach);
+  const p = await c.player("oldstudent", ip());
+  await c.ok("addSession", { kind: "lesson", ts: Date.now() + HOUR, title: "Intro", price: 0 }, coach);
+  await c.ok("book", { sessionId: (await c.ok("state", {}, p)).sessions[0].id }, p);
+  await c.ok("attend", { id: (await c.ok("state", {}, p)).bookings[0].id }, coach);
+  const st = __dump(), cid = (await c.ok("state", {}, coach)).me.id, u = JSON.parse(st.get("u/" + cid).v);
+  delete u.stu; st.set("u/" + cid, { v: JSON.stringify(u), etag: "old" }); // as if attended under v7.1
+  await c.ok("state", {}, coach);
+  assert.equal(JSON.parse(st.get("u/" + cid).v).stu.length, 1);
+});

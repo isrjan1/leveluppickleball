@@ -89,10 +89,17 @@ async function byName(s, n) {
 let BOOTED = false;
 async function boot(s) {
   if (BOOTED) return;
-  if (await byName(s, "admin")) return (BOOTED = true);
-  if ((await loadAll(s)).some(x => x.role === "admin" && !x.disabled)) return (BOOTED = true);
+  const ex = await byName(s, "admin");
+  if (ex) {
+    // Deploys from before v7.2 may still have admin/admin. Once ADMIN_PASSWORD is set, it replaces that
+    // default password (and ends any sessions made with it). Until then, login refuses the default.
+    if (ex.defaultPw && process.env.ADMIN_PASSWORD) await mutU(s, ex.id, async u => { if (u.defaultPw) { u.tv = (u.tv | 0) + 1; u.defaultPw = false; await setPw(u, process.env.ADMIN_PASSWORD); } });
+    return (BOOTED = true);
+  }
   // Never fall back to a guessable password: a fresh public deploy would hand admin to whoever logs in first.
-  if (!process.env.ADMIN_PASSWORD) { console.warn("No admin account yet: set ADMIN_PASSWORD in Netlify env vars and redeploy"); return; }
+  // Without ADMIN_PASSWORD there's nothing to create, so skip the full user scan too.
+  if (!process.env.ADMIN_PASSWORD) return;
+  if ((await loadAll(s)).some(x => x.role === "admin" && !x.disabled)) return (BOOTED = true);
   const u = newUser("admin", "admin");
   await setPw(u, process.env.ADMIN_PASSWORD);
   await createUser(s, u); BOOTED = true;
@@ -278,7 +285,7 @@ async function handle(req, context) {
     const n = String(b.username || "").toLowerCase(), pw = String(b.password || "");
     if ((await Promise.all([locked(s, "u:" + n, 8, 9e5), locked(s, "i:" + ip, 40, 9e5)])).some(Boolean)) return E("Too many attempts. Try again in 15 minutes.", 429);
     const u = await byName(s, n);
-    if (!u && n === "admin" && !process.env.ADMIN_PASSWORD) return E("Admin not set up: add ADMIN_PASSWORD in Netlify environment variables, then redeploy", 503);
+    if (n === "admin" && !process.env.ADMIN_PASSWORD && (!u || u.defaultPw)) return E(u ? "The default admin password is disabled for security: set ADMIN_PASSWORD in Netlify environment variables, then redeploy" : "Admin not set up: add ADMIN_PASSWORD in Netlify environment variables, then redeploy", 503);
     if (pw.length < 1 || pw.length > 128 || !(await verify(s, u, pw))) { await Promise.all([hit(s, "u:" + n, 9e5), hit(s, "i:" + ip, 9e5)]); return E("bad credentials", 401); }
     if (u.disabled) return E("This account is disabled", 403);
     return J({ token: await token(s, u) });
@@ -305,7 +312,13 @@ async function handle(req, context) {
   if (a === "state") {
     // Queued players' polls also run matchmaking, so a freed court or an expired cross-tier wait is picked up
     // without waiting for someone else to join. matchmake writes nothing when there is nothing to do.
-    if ((await jget(s, "q", [])).some(x => x.id === me.id && fresh(x))) { await matchmake(s, cfg); return ok(); }
+    if ((await jget(s, "q", [])).some(x => x.id === me.id && fresh(x))) await matchmake(s, cfg).catch(e => console.warn("poll matchmake", e.message));
+    // one-time backfill of the durable roster for coaches whose students predate v7.2
+    if (me.role !== "player" && !me.stu) {
+      const stu = [...new Set((await jget(s, "bk", [])).filter(x => x.coach === me.id && x.status === "attended").map(x => x.player))];
+      await mutU(s, me.id, u => { if (u.stu) return SKIP; u.stu = stu; });
+      me.stu = stu;
+    }
     return ok();
   }
   if (a === "survey") { // self-assessed skill profile: 6 traits, each 1-5; retake every 14 days
@@ -390,7 +403,7 @@ async function handle(req, context) {
       if (live.length >= x.cap) throw new Bad("Session is full");
       if (bk.some(v => v.player === me.id && v.status === "booked" && v.ts < x.ts + (x.dur || 60) * 6e4 && x.ts < v.ts + (v.dur || 60) * 6e4)) throw new Bad("You already have a booking at that time");
       bk.push({ id: uid(), sid: x.id, coach: x.coach, player: me.id, kind: x.kind, ts: x.ts, dur: x.dur || 60, made: Date.now(), price: x.price, paid: false, status: "booked" });
-      trim(bk, 1000, v => (v.status === "booked" && v.ts > Date.now() - 864e5) || (!v.paid && v.price && v.status !== "cancelled"));
+      trim(bk, 1000, v => (v.status === "booked" && v.ts > Date.now() - 864e5) || (v.price && v.status !== "cancelled"));
     });
     return ok("Booked. Show your booking code to the coach.");
   }
