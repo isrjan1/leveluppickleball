@@ -1,0 +1,7 @@
+{
+  "name": "the-system",
+  "private": true,
+  "version": "7.0.0",
+  "engines": { "node": ">=18" },
+  "dependencies": { "@netlify/blobs": ">=8.2.0" }
+}
