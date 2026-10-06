@@ -95,3 +95,43 @@ test("daily quests rotate through more than two fixed sets", async () => {
   for (let d = 0; d < 8; d++) { sets.add((await c.ok("state", {}, t)).today.map(q => q.t).sort().join("|")); advance(DAY); }
   assert.ok(sets.size > 2, `only ${sets.size} distinct quest sets in 8 days`);
 });
+
+test("cross-tier fill never puts Beginner and Advanced players on the same court", async () => {
+  const c = await fresh(ADMIN);
+  const { __dump: dump } = await import("@netlify/blobs");
+  const ts = [];
+  for (const n of ["bga", "bgb", "adv", "adw"]) ts.push(await c.player(n, ip()));
+  // two Beginners, one Intermediate, one Advanced: the only "full" mix would span Beginner to Advanced
+  const now = Date.now(), ids = await Promise.all(ts.map(async t => (await c.ok("state", {}, t)).me.id));
+  dump().set("q", { v: JSON.stringify(ids.map((id, i) => ({ id, tier: [0, 0, 1, 2][i], t: now + i }))), etag: "manual2" });
+  advance(20 * MIN);
+  await c.ok("checkin", {}, ts[0]);
+  assert.equal((await c.ok("state", {}, ts[0])).match, null);
+});
+
+test("eight queued players fill two free courts at once", async () => {
+  const c = await fresh(ADMIN);
+  const { __dump: dump } = await import("@netlify/blobs");
+  const ts = [];
+  for (let i = 0; i < 8; i++) ts.push(await c.player("eight" + i, ip()));
+  // queue all eight without triggering matchmaking, then let one poll do the work
+  const now = Date.now(), ids = await Promise.all(ts.map(async t => (await c.ok("state", {}, t)).me.id));
+  dump().set("q", { v: JSON.stringify(ids.map((id, i) => ({ id, tier: 0, t: now + i }))), etag: "manual3" });
+  await c.ok("state", {}, ts[0]);
+  const courts = new Set((await Promise.all(ts.map(t => c.ok("state", {}, t)))).map(s => s.match?.court));
+  assert.deepEqual([...courts].sort(), ["Court 1", "Court 2"]);
+});
+
+test("simultaneous joins start exactly one match; simultaneous confirmations pay XP once", async () => {
+  const c = await fresh(ADMIN);
+  const ts = [];
+  for (const n of ["cca", "ccb", "ccc", "ccd"]) ts.push(await c.player(n, ip()));
+  await Promise.all(ts.map(t => c.ok("join", {}, t)));
+  const ss = await Promise.all(ts.map(t => c.ok("state", {}, t)));
+  assert.equal(new Set(ss.map(s => s.match?.id)).size, 1);
+  advance(6 * MIN);
+  const id = ss[0].match.id;
+  await Promise.all(ts.map(t => c.call("score", { matchId: id, a: 11, b: 4 }, t)));
+  const xp = (await Promise.all(ts.map(t => c.ok("state", {}, t)))).map(s => s.me.xp).sort();
+  assert.deepEqual(xp, [10, 10, 30, 30]);
+});
