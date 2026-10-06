@@ -45,3 +45,11 @@ v8.3 (clubs):
 - Every open play belongs to a club: the host must pick one of their own clubs when publishing, and the club shows on the open play and on the club page. Open plays created before v8.3 have no club and keep working.
 - Players tab now has Players and Clubs side by side. The Clubs view has the club ranking, ordered by the average rating of each club's rated players (NR players are counted as members but not in the average; a player in several clubs counts in each). Tap a club for its players, open plays, and join/leave. Profiles and the Me tab list a player's clubs.
 - Data: one "cl" list (clubs with members); open plays store club and cn (club name). API actions: clubs, clubGet, clubCreate, clubJoin, clubLeave, clubKick, clubDelete. test/clubs.test.mjs covers them.
+
+v8.4 (Club tab, leaderboard, group chats):
+- The Players tab is now **Leaderboard** (Players | Clubs ranking). Creating clubs moved out of it.
+- New **Club** tab: create a club, see My clubs and Find a club. Owners (and admins) can edit the name, place, description and **rules**, choose whether joining needs owner approval, choose whether only the owner can host open plays, approve or decline join requests, remove players, and delete the club. Rules are visible to everyone before they join. Renaming a club updates its open plays.
+- **Club group chat** on every club page, members only (last 200 messages kept, 500 characters, 30 messages a minute shared with friend chat).
+- **Open play group chat** on every open play, for the host and joined players. Leaving the open play or the club removes access. Chats of old open plays are deleted with the open play. API actions: gcGet, gcSend (kind club or op), clubUpdate, clubApprove, clubDecline.
+
+v8.5 (UI): dark theme by default with a Light option (top bar, login screen, Me > Appearance; saved per device); pickleball-rolling loader on login, sign-up, saved-session resume and logout; adaptive layout (small phone, phone, tablet, desktop with side navigation, wide desktop).
