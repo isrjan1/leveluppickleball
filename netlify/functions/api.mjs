@@ -1,4 +1,4 @@
-// Pickleball Level Up v6 API: server-authoritative XP, Elo, queue, coach sign-off, RBAC.
+// Pickleball Level Up API: server-authoritative club rating (2.000-8.000), XP, queue, coach sign-off, RBAC.
 import { getStore } from "@netlify/blobs";
 import { createHash, createHmac, randomBytes, timingSafeEqual, scrypt } from "node:crypto";
 const scr = (p, salt) => new Promise((res, rej) => scrypt(p, salt, 32, (e, k) => (e ? rej(e) : res(k))));
@@ -13,15 +13,25 @@ const uid = () => randomBytes(5).toString("hex");
 const TIERS = ["Beginner", "Intermediate", "Advanced"];
 const BADGES = { dink_master: { n: "Dink Master", tier: 1 }, third_shot_pro: { n: "Third-Shot Drop Pro", tier: 2 } };
 const POOL = [["Wall dinks: 50 in a row", 15], ["Paddle flips: 3 sets of 20", 10], ["Footwork shadow drill: 5 min", 15],
-  ["Soft-hands catch drill: 3 min", 10], ["Serve target practice: 20 serves", 15], ["Split-step shadow rallies: 5 min", 10]];
+  ["Soft-hands catch drill: 3 min", 10], ["Serve target practice: 20 serves", 15], ["Split-step shadow rallies: 5 min", 10],
+  ["Backhand wall volleys: 3 sets of 15", 15], ["Lateral kitchen-line shuffles: 4 x 30 sec", 10], ["Drop-shot toss-and-catch: 30 reps", 10],
+  ["Return-of-serve shadow swings: 30 reps", 10]];
 const ROLE = ["player", "certified_coach", "admin"];
-// Tier ceiling: Elo and XP stop growing until the next badge is signed off by a coach.
+const RESERVED = new Set(["admin", "administrator", "root", "system", "support", "staff"]); // can't be registered by the public
+const MIX_AFTER = 10 * 6e4; // after this long without 4 in their own tier, players may be matched with the adjacent tier
+// Tier ceiling: XP stops growing until the next badge is signed off by a coach. The rating is never capped.
 const DAILY = 150; // max XP per day from ranked matches
-const CAP = [{ elo: 1200, xp: 1000 }, { elo: 1400, xp: 3000 }, { elo: Infinity, xp: Infinity }];
+const CAP = [{ xp: 1000 }, { xp: 3000 }, { xp: Infinity }];
+const CONFIRM = 15 * 6e4; // once both teams agree on a score, it auto-validates after this unless someone rejects
 const DEF = { courts: ["Court 1", "Court 2", "Court 3", "Court 4"], lat: null, lng: null, rad: 150, minMin: 5, tz: "UTC", qr: false, inv: [] };
 
 const jget = async (s, k, d) => (await s.get(k, { type: "json" })) ?? d;
-const getU = (s, id) => jget(s, "u/" + id, null);
+const getU = async (s, id) => norm(await jget(s, "u/" + id, null));
+// Cap a log at max entries, dropping the oldest records that are no longer live first (keep(x) = still live).
+const trim = (arr, max, keep) => {
+  for (let i = 0; i < arr.length && arr.length > max;) keep(arr[i]) ? i++ : arr.splice(i, 1);
+  if (arr.length > max) arr.splice(0, arr.length - max);
+};
 // ---- Concurrency: optimistic compare-and-swap with retry (Netlify Blobs conditional writes) ----
 class Bad extends Error { constructor(m, st = 400) { super(m); this.st = st; } }
 const SKIP = Symbol("skip");
@@ -40,8 +50,8 @@ async function mutate(s, key, def, fn) {
   }
   throw new Bad("Server busy, please try again", 503);
 }
-const mutU = (s, id, fn) => mutate(s, "u/" + id, null, u => { if (!u) throw new Bad("User not found", 404); return fn(u); });
-const giveXp = (s, id, n) => mutate(s, "u/" + id, null, u => { if (!u) return SKIP; addXp(u, n); });
+const mutU = (s, id, fn) => mutate(s, "u/" + id, null, u => { if (!u) throw new Bad("User not found", 404); norm(u); return fn(u); });
+const giveXp = (s, id, n) => mutate(s, "u/" + id, null, u => { if (!u) return SKIP; norm(u); addXp(u, n); });
 async function createUser(s, u) { // username claimed atomically
   await s.setJSON("u/" + u.id, u);
   const r = await s.set("name/" + u.username.toLowerCase(), u.id, { onlyIfNew: true });
@@ -50,15 +60,53 @@ async function createUser(s, u) { // username claimed atomically
 }
 async function loadAll(s) {
   const { blobs } = await s.list({ prefix: "u/" });
-  return (await Promise.all(blobs.map(b => s.get(b.key, { type: "json" })))).filter(Boolean);
+  return (await Promise.all(blobs.map(b => s.get(b.key, { type: "json" })))).filter(Boolean).map(norm);
 }
 const strip = ({ ph, salt, h, tv, dx, ...u }) => u;
 const tierOf = u => (u.badges.includes("dink_master") ? (u.badges.includes("third_shot_pro") ? 2 : 1) : 0);
 // XP past the tier ceiling is banked (max 500) and released when the next badge is signed off.
 const addXp = (u, n) => { const g = Math.min(n, Math.max(0, CAP[tierOf(u)].xp - u.xp)); u.xp += g; if (g < n) u.bank = Math.min(500, (u.bank | 0) + n - g); };
-const pub = u => ({ ...strip(u), tier: tierOf(u), cap: tierOf(u) < 2 ? CAP[tierOf(u)] : null });
+const pub = u => ({ ...strip(u), tier: tierOf(u), cap: tierOf(u) < 2 ? CAP[tierOf(u)] : null, rel: reliability(u) });
 const newUser = (n, role = "player") => ({ id: uid(), username: n, role, created: Date.now(), disabled: false, tv: 0,
-  defaultPw: false, xp: 0, elo: 1000, badges: [], w: 0, l: 0, done: [], ci: 0, last: "" });
+  defaultPw: false, xp: 0, pr: NR_ASSUME, ip: 0, hist: [], badges: [], w: 0, l: 0, done: [], ci: 0, last: "" });
+
+// ---- Club rating, modelled on how DUPR works ----
+// 2.000-8.000, three decimals. Before a match the teams' average ratings give an expected share of points;
+// the rating moves by (actual share - expected share), so winning by less than expected can lower it and
+// losing by less than expected can raise it. Big swings for new/unreliable players, small for established ones,
+// capped per match. New players are NR (not rated): they carry a provisional rating (default 3.5, seeded by the
+// skill survey or set by a certified coach) until they collect 3 initialization points or 7 days pass.
+const RMIN = 2, RMAX = 8, NR_ASSUME = 3.5, SPREAD = 2.28; // SPREAD: a 1.0 rating gap expects roughly 11-4
+const MAXMOVE = .2, INIT_PTS = 3, INIT_DAYS = 7;
+const r3 = x => Math.round(x * 1000) / 1000;
+const clampR = x => Math.min(RMAX, Math.max(RMIN, x));
+const rated = u => typeof u.r === "number";
+const rtg = u => (rated(u) ? u.r : typeof u.pr === "number" ? u.pr : NR_ASSUME); // value used for expectations and team balancing
+const expShare = (a, b) => 1 / (1 + 10 ** (-(a - b) / SPREAD)); // expected share of all points won by team a
+const winProb = (a, b) => 1 / (1 + 10 ** (-(a - b) / .8));
+// Reliability 1-100%: variety of partners and opposing teams over the last 30 matches, decaying without play.
+// 60% needs 2+ partners and 6+ opposing teams; 100% needs 4+ partners and 12+ opposing teams.
+function reliability(u) {
+  const h = (u.hist || []).slice(-30);
+  if (!h.length) return 0;
+  const pts = new Set(h.map(x => x.pt)).size, ops = new Set(h.map(x => x.op.slice().sort().join("+"))).size;
+  const f = pts >= 4 ? 1 : pts >= 2 ? .6 + .2 * (pts - 2) : .3 * pts;
+  const g = ops >= 12 ? 1 : ops >= 6 ? .6 + .4 * (ops - 6) / 6 : .1 * ops;
+  const days = (Date.now() - h.at(-1).t) / 864e5, decay = days <= 14 ? 1 : Math.max(.3, 1 - (days - 14) / 300);
+  return Math.max(1, Math.round(100 * Math.min(f, g) * decay));
+}
+// Read-time upgrade of older records: players who already had Elo games get a rating mapped from it
+// (1000 -> 3.000, every 400 Elo = 1.0); others start NR. Also finishes a 7-day initialization window.
+function norm(u) {
+  if (!u) return u;
+  if (u.r === undefined && u.pr === undefined) {
+    if ((u.w | 0) + (u.l | 0) > 0 && typeof u.elo === "number") u.r = r3(clampR(3 + (u.elo - 1000) / 400));
+    else { u.pr = NR_ASSUME; u.ip = 0; }
+  }
+  if (!rated(u) && u.f && Date.now() - u.f > INIT_DAYS * 864e5) u.r = r3(clampR(rtg(u)));
+  u.hist = u.hist || [];
+  return u;
+}
 async function setPw(u, pw) { u.salt = randomBytes(16).toString("hex"); u.h = (await scr(pw, u.salt)).toString("hex"); delete u.ph; }
 
 let SEC; // signing secret never changes once created, so cache it per function instance
@@ -80,11 +128,19 @@ async function byName(s, n) {
 let BOOTED = false;
 async function boot(s) {
   if (BOOTED) return;
-  if (await byName(s, "admin")) return (BOOTED = true);
+  const ex = await byName(s, "admin");
+  if (ex) {
+    // Deploys from before v7.2 may still have admin/admin. Once ADMIN_PASSWORD is set, it replaces that
+    // default password (and ends any sessions made with it). Until then, login refuses the default.
+    if (ex.defaultPw && process.env.ADMIN_PASSWORD) await mutU(s, ex.id, async u => { if (u.defaultPw) { u.tv = (u.tv | 0) + 1; u.defaultPw = false; await setPw(u, process.env.ADMIN_PASSWORD); } });
+    return (BOOTED = true);
+  }
+  // Never fall back to a guessable password: a fresh public deploy would hand admin to whoever logs in first.
+  // Without ADMIN_PASSWORD there's nothing to create, so skip the full user scan too.
+  if (!process.env.ADMIN_PASSWORD) return;
   if ((await loadAll(s)).some(x => x.role === "admin" && !x.disabled)) return (BOOTED = true);
   const u = newUser("admin", "admin");
-  await setPw(u, process.env.ADMIN_PASSWORD || "admin");
-  u.defaultPw = !process.env.ADMIN_PASSWORD;
+  await setPw(u, process.env.ADMIN_PASSWORD);
   await createUser(s, u); BOOTED = true;
 }
 async function auth(s, req) {
@@ -113,65 +169,110 @@ const dist = (a, b, c, d) => {
 };
 const qrAt = async (s, w) => sign(await secret(s), "qr:" + w).replace(/[^A-Za-z0-9]/g, "").slice(0, 8).toUpperCase();
 const qrOk = async (s, c) => { const w = Math.floor(Date.now() / 6e4); c = c.trim().toUpperCase(); for (let i = 0; i < 3; i++) if (same(await qrAt(s, w - i), c)) return true; return false; };
-const dayN = tz => { try { return Math.floor(Date.parse(new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date()) + "T00:00:00Z") / 864e5); } catch { return Math.floor(Date.now() / 864e5); } };
-const todays = tz => { const d = dayN(tz); return [0, 2, 4].map(i => { const k = (d + i) % POOL.length; return { id: "d" + d + "-" + k, t: POOL[k][0], xp: POOL[k][1] }; }); };
+const dayN = tz => { try { return Math.floor(Date.parse(new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date(Date.now())) + "T00:00:00Z") / 864e5); } catch { return Math.floor(Date.now() / 864e5); } };
+// Three distinct drills per day, picked by a day-seeded shuffle so the mix changes daily (same for everyone in the club).
+const todays = tz => {
+  const d = dayN(tz), idx = POOL.map((_, i) => i);
+  let r = (d * 2654435761) >>> 0;
+  for (let i = idx.length - 1; i > 0; i--) { r = (Math.imul(r ^ (r >>> 15), 2246822507) + 0x6d2b79f5) >>> 0; const j = r % (i + 1); [idx[i], idx[j]] = [idx[j], idx[i]]; }
+  return idx.slice(0, 3).map(k => ({ id: "d" + d + "-" + k, t: POOL[k][0], xp: POOL[k][1] }));
+};
 
-// Elo-style XP engine. Ex = expected win chance. Underdog upset 2.5x XP, stomping 0.25x, losing underdogs protected, losing favorites penalized.
-// planFinish runs inside the match CAS (reads only); the winner of that CAS applies the result to each player with a per-user CAS, so XP is applied exactly once.
+// planFinish runs inside the match CAS (reads only); the winner of that CAS applies the result to each player with a per-user CAS,
+// so rating and XP are applied exactly once. XP: underdog upset 2.5x, stomping 0.25x.
+// Repeat groups (3+ same players again within 12h) get both XP and rating change damped to 50%, then 25%.
 async function planFinish(s, m, sa, sb, ms, tz) {
   const us = await Promise.all(m.p.map(id => getU(s, id)));
   if (us.some(u => !u)) { m.status = "done"; m.void = true; m.end = Date.now(); return null; }
-  const ea = (us[0].elo + us[1].elo) / 2, eb = (us[2].elo + us[3].elo) / 2;
-  const EA = 1 / (1 + 10 ** ((eb - ea) / 400)), aw = sa > sb;
+  const ra = (rtg(us[0]) + rtg(us[1])) / 2, rb = (rtg(us[2]) + rtg(us[3])) / 2;
+  const EA = expShare(ra, rb), WA = winProb(ra, rb), aw = sa > sb;
   // repeat-group damping: same group (3+ shared players) finishing again within 12h earns less XP
   const rep = ms.filter(x => x !== m && x.status === "done" && !x.void && Date.now() - x.end < 432e5 && x.p.filter(id => m.p.includes(id)).length >= 3).length;
   if (rep >= 2) m.flag = true;
   m.status = "done"; m.sa = sa; m.sb = sb; m.end = Date.now();
-  return { tz, sa, sb, rm: rep >= 2 ? .25 : rep >= 1 ? .5 : 1, ids: m.p.slice(), p: us.map((_, i) => { const A = i < 2; return { A, win: A === aw, Ex: A ? EA : 1 - EA }; }) };
+  m.exp = r3(EA);
+  return { tz, sa, sb, mid: m.id, rm: rep >= 2 ? .25 : rep >= 1 ? .5 : 1, ids: m.p.slice(), p: us.map((_, i) => {
+    const A = i < 2, pt = m.p[[1, 0, 3, 2][i]], op = A ? m.p.slice(2) : m.p.slice(0, 2);
+    const ro = us.filter((x, j) => j !== i && rated(x)).length; // rated players among the other three
+    return { A, win: A === aw, exp: A ? EA : 1 - EA, wp: A ? WA : 1 - WA, pt, op, ro };
+  }) };
 }
-function applyResult(u, pl, { A, win, Ex }) {
-  const dn = dayN(pl.tz);
-  let d = 32 * ((win ? 1 : 0) - Ex), xp = 10;
-  if (win) xp = Math.round(30 * (Ex < .4 ? 2.5 : Ex > .7 ? .25 : 1));
-  else { if (Ex < .4) d *= .4; if (Ex > .6) d *= 1.5; }
-  d = Math.round(d);
+function applyResult(u, pl, { A, win, exp, wp, pt, op, ro }) {
+  const dn = dayN(pl.tz), my = A ? pl.sa : pl.sb, th = A ? pl.sb : pl.sa, nr = !rated(u);
+  // rating: actual share of points vs expected share
+  const K = nr ? 1 : .25 + .5 * (1 - reliability(u) / 100); // new or unreliable ratings move more
+  const w = .5 + .5 * ro / 3;                                // results against unrated players count less
+  const d = r3(Math.max(-MAXMOVE, Math.min(MAXMOVE, K * w * pl.rm * (my / (my + th) - exp))));
+  if (nr) {
+    u.pr = r3(clampR(rtg(u) + d)); u.ip = (u.ip || 0) + Math.max(.0625, ro / 3); u.f = u.f || Date.now();
+    if (u.ip >= INIT_PTS) u.r = u.pr;
+  } else u.r = r3(clampR(u.r + d));
+  // XP
+  let xp = 10;
+  if (win) xp = Math.round(30 * (wp < .4 ? 2.5 : wp > .7 ? .25 : 1));
   const raw = xp; xp = Math.round(xp * pl.rm);
   if (!u.dx || u.dx.d !== dn) u.dx = { d: dn, n: 0 };
   xp = Math.max(0, Math.min(xp, DAILY - u.dx.n)); u.dx.n += xp;
-  const cut = xp < raw, x0 = u.xp, e0 = u.elo;
-  u.elo = Math.min(CAP[tierOf(u)].elo, Math.max(100, u.elo + d)); addXp(u, xp); win ? u.w++ : u.l++;
-  const gx = u.xp - x0, ge = u.elo - e0;
-  u.last = `${win ? "Won" : "Lost"} ${A ? pl.sa : pl.sb}-${A ? pl.sb : pl.sa}: ${gx} XP, Elo ${ge >= 0 ? "+" : ""}${ge}` + (gx < xp || (d > 0 && ge < d) ? " (tier ceiling)" : "") + (cut ? " (reduced: daily cap or repeat group)" : "");
+  const x0 = u.xp; addXp(u, xp); win ? u.w++ : u.l++;
+  const gx = u.xp - x0;
+  u.hist = [...(u.hist || []), { t: Date.now(), m: pl.mid, pt, op, s: [my, th], d, w: win, nr, ex: r3(exp) }].slice(-30);
+  u.last = `${win ? "Won" : "Lost"} ${my}-${th}: rating ${d >= 0 ? "+" : ""}${d.toFixed(3)}${nr ? (rated(u) ? " (now rated)" : " (provisional)") : ""}, +${gx} XP`
+    + (gx < xp ? " (XP ceiling: banked)" : "") + (xp < raw ? " (XP reduced: daily cap or repeat group)" : "");
 }
 async function applyPlan(s, pl) {
   if (!pl) return;
   const r = await Promise.allSettled(pl.ids.map((id, i) => mutU(s, id, u => applyResult(u, pl, pl.p[i]))));
   r.forEach(x => x.status === "rejected" && console.error("applyPlan", x.reason));
+  await board(s, true).catch(e => console.warn("board refresh", e.message)); // rankings reflect the result immediately
 }
-async function expire(s) {
-  await mutate(s, "m", [], ms => {
+// Housekeeping on the match list: auto-validate scores both teams agreed on CONFIRM ago (nobody rejected),
+// void abandoned matches (3h) and stale disputes (12h).
+async function expire(s, tz) {
+  const plans = [];
+  await mutate(s, "m", [], async ms => {
+    plans.length = 0;
     let ch = false;
-    for (const m of ms) if ((m.status === "playing" && Date.now() - m.start > 3 * 36e5) || (m.status === "disputed" && Date.now() - m.start > 12 * 36e5)) { m.status = "done"; m.void = true; m.end = Date.now(); ch = true; }
+    for (const m of ms) {
+      if (m.status === "playing" && m.cf && Date.now() - m.cf >= CONFIRM) {
+        const [x, y] = Object.values(m.sub)[0]; m.auto = true;
+        plans.push(await planFinish(s, m, x, y, ms, tz)); ch = true;
+      } else if ((m.status === "playing" && Date.now() - m.start > 3 * 36e5) || (m.status === "disputed" && Date.now() - m.start > 12 * 36e5)) { m.status = "done"; m.void = true; m.end = Date.now(); ch = true; }
+    }
     return ch ? undefined : SKIP;
   });
+  for (const p of plans) await applyPlan(s, p);
 }
 // Matches are created inside the "m" CAS (court + player exclusivity can't be violated), then used players leave the queue.
 async function matchmake(s, cfg) {
-  await expire(s);
+  await expire(s, cfg.tz);
   const used = new Set();
   await mutate(s, "m", [], async ms => {
     used.clear();
     const q = (await jget(s, "q", [])).filter(fresh), act = ms.filter(m => m.status !== "done");
     const busy = new Set(act.map(m => m.court)), inM = new Set(act.flatMap(m => m.p));
     let ch = false;
-    for (let t = 0; t < 3; t++) {
-      const row = q.filter(x => x.tier === t && !inM.has(x.id)), free = cfg.courts.find(c => !busy.has(c));
-      if (row.length < 4 || !free) continue;
-      const four = row.slice(0, 4), us = await Promise.all(four.map(x => getU(s, x.id)));
-      if (us.some(u => !u)) continue;
-      us.sort((a, b) => b.elo - a.elo);
-      ms.push({ id: uid(), court: free, tier: t, p: [us[0].id, us[3].id, us[1].id, us[2].id], start: Date.now(), status: "playing", sub: {} });
+    const avail = x => !inM.has(x.id);
+    const start = async (t, four, mixed) => {
+      const free = cfg.courts.find(c => !busy.has(c));
+      if (!free) return false;
+      const us = await Promise.all(four.map(x => getU(s, x.id)));
+      const bad = four.filter((_, i) => !us[i] || us[i].disabled);
+      if (bad.length) { bad.forEach(f => { inM.add(f.id); used.add(f.id); }); return true; } // drop dead entries from the queue, keep going
+      us.sort((a, b) => rtg(b) - rtg(a)); // strongest + weakest vs the middle two
+      ms.push({ id: uid(), court: free, tier: t, mixed: mixed || undefined, p: [us[0].id, us[3].id, us[1].id, us[2].id], start: Date.now(), status: "playing", sub: {} });
       busy.add(free); four.forEach(f => { inM.add(f.id); used.add(f.id); }); ch = true;
+      return true;
+    };
+    // Pass 1: same-tier matches, as many as there are free courts (oldest in queue first).
+    for (let t = 0; t < 3; t++) {
+      for (let row; (row = q.filter(x => x.tier === t && avail(x))).length >= 4;) if (!(await start(t, row.slice(0, 4)))) break;
+    }
+    // Pass 2: a tier that can't fill a court and has waited MIX_AFTER may borrow from the adjacent tier(s).
+    for (let t = 0; t < 3; t++) {
+      for (let row; (row = q.filter(x => x.tier === t && avail(x))).length && Date.now() - row[0].t >= MIX_AFTER;) {
+        const pool = [t + 1, t - 1].map(nb => row.concat(q.filter(x => x.tier === nb && avail(x)))).find(p => p.length >= 4); // one neighbour tier only
+        if (!pool || !(await start(t, pool.slice(0, 4), true))) break;
+      }
     }
     for (let i = 0; i < ms.length && ms.length > 300;) ms[i].status === "done" ? ms.splice(i, 1) : i++;
     return ch ? undefined : SKIP;
@@ -179,13 +280,25 @@ async function matchmake(s, cfg) {
   if (used.size) await mutate(s, "q", [], q => q.filter(x => fresh(x) && !used.has(x.id)));
 }
 
-async function board(s) {
-  const c = await jget(s, "board", null);
-  if (c && Date.now() - c.t < 6e4) return c.rows;
-  const rows = (await loadAll(s)).filter(u => u.role !== "admin" && !u.disabled).sort((a, b) => b.elo - a.elo).slice(0, 25)
-    .map(u => ({ id: u.id, n: u.username, e: u.elo, x: u.xp, t: tierOf(u) }));
-  await s.setJSON("board", { t: Date.now(), rows });
+// Player index for the leaderboard and the Players directory: every active non-admin, rated first by rating.
+async function board(s, force) {
+  const c = force ? null : await jget(s, "board", null);
+  if (c && c.v === 2 && Date.now() - c.t < 6e4) return c.rows;
+  const rows = (await loadAll(s)).filter(u => u.role !== "admin" && !u.disabled)
+    .map(u => ({ id: u.id, n: u.username, r: rated(u) ? u.r : null, rel: reliability(u), x: u.xp, t: tierOf(u), w: u.w | 0, l: u.l | 0, c: u.role === "certified_coach" || undefined }))
+    .sort((a, b) => (b.r ?? -1) - (a.r ?? -1) || a.n.localeCompare(b.n));
+  await s.setJSON("board", { v: 2, t: Date.now(), rows });
   return rows;
+}
+// Public profile: what any club member can see about another player.
+async function profile(s, id, self) {
+  const u = await getU(s, id);
+  if (!u || (!self && (u.disabled || u.role === "admin"))) return null;
+  const ids = [...new Set(u.hist.slice(-15).flatMap(h => [h.pt, ...h.op]))];
+  const names = new Map(await Promise.all(ids.map(async i => [i, (await getU(s, i))?.username || "Former player"])));
+  return { id: u.id, n: u.username, r: rated(u) ? u.r : null, pr: rated(u) ? null : rtg(u), ip: u.ip || 0, rel: reliability(u), w: u.w | 0, l: u.l | 0,
+    t: tierOf(u), badges: u.badges, coach: u.role === "certified_coach", src: u.src || null, since: u.created, sk: u.sk || null, xp: u.xp,
+    hist: u.hist.slice(-15).reverse().map(h => ({ t: h.t, s: h.s, d: h.d, w: h.w, nr: !!h.nr, ex: h.ex, pt: names.get(h.pt), op: h.op.map(i => names.get(i)) })) };
 }
 async function coaches(s, force) {
   let c = force ? null : await jget(s, "coaches", null);
@@ -199,23 +312,37 @@ async function snapshot(s, me, cfg, full) {
   const mm = ms.filter(m => m.p.includes(me.id) && m.status !== "done" && Date.now() - m.start < 3 * 36e5).pop();
   const out = {
     me: pub(me), qr: !!cfg.qr, tiers: TIERS, badgeDefs: BADGES, today: todays(cfg.tz).map(x => ({ ...x, done: me.done.includes(x.id) })),
-    checked: Date.now() - me.ci < 4 * 36e5, inQueue: qf.some(x => x.id === me.id),
+    checked: Date.now() - me.ci < 4 * 36e5, inQueue: qf.some(x => x.id === me.id), qSince: qf.find(x => x.id === me.id)?.t || null, mixAfter: MIX_AFTER,
     queue: TIERS.map((_, t) => qf.filter(x => x.tier === t).length),
-    match: mm ? { id: mm.id, court: mm.court, status: mm.status, start: mm.start, minMin: cfg.minMin,
-      A: [await nm(mm.p[0]), await nm(mm.p[1])], B: [await nm(mm.p[2]), await nm(mm.p[3])], sent: !!mm.sub[me.id] } : null,
+    match: mm ? await (async () => {
+      const us = await Promise.all(mm.p.map(id => getU(s, id))), side = mm.p.indexOf(me.id) < 2 ? 0 : 1;
+      const ra = (rtg(us[0]) + rtg(us[1])) / 2, rb = (rtg(us[2]) + rtg(us[3])) / 2, first = Object.values(mm.sub)[0] || null;
+      return { id: mm.id, court: mm.court, status: mm.status, start: mm.start, minMin: cfg.minMin, mixed: !!mm.mixed,
+        A: [await nm(mm.p[0]), await nm(mm.p[1])], B: [await nm(mm.p[2]), await nm(mm.p[3])],
+        Ar: us.slice(0, 2).map(u => (rated(u) ? u.r : null)), Br: us.slice(2).map(u => (rated(u) ? u.r : null)),
+        side, exp: r3(side ? 1 - expShare(ra, rb) : expShare(ra, rb)), sent: !!mm.sub[me.id], mine: mm.sub[me.id] || null,
+        agreed: first, nsub: Object.keys(mm.sub).length, cf: mm.cf || null, confirm: CONFIRM,
+        unlock: mm.start + cfg.minMin * 6e4, now: Date.now(), // server clock, so countdowns don't depend on the phone's clock
+        // each player's part in recording the score: the first to submit "entered" it, matching submissions "confirmed"
+        ppl: await Promise.all(mm.p.map(async (id, i) => ({ n: await nm(id), team: i < 2 ? 0 : 1, me: id === me.id,
+          st: !mm.sub[id] ? "waiting" : id === Object.keys(mm.sub)[0] ? "entered" : "confirmed" }))),
+        enteredBy: Object.keys(mm.sub).length ? await nm(Object.keys(mm.sub)[0]) : null,
+        allNR: us.every(u => !rated(u)) };
+    })() : null,
     sessions: ss.filter(x => x.status === "open" && x.ts > Date.now()).sort((a, b) => a.ts - b.ts).slice(0, 40).map(x => {
       const n = live.filter(b => b.sid === x.id);
       return { id: x.id, coach: cn.get(x.coach) || "Coach", kind: x.kind, ts: x.ts, title: x.title, price: x.price, dur: x.dur || 60, left: x.cap - n.length, mine: n.some(b => b.player === me.id), own: x.coach === me.id };
     }),
     bookings: await Promise.all(bk.filter(b => b.player === me.id).slice(-10).map(async b => ({ ...b, cn: await nm(b.coach), pay: cp.get(b.coach) || "", dur: b.dur || sm.get(b.sid)?.dur || 60, title: sm.get(b.sid)?.title || b.kind }))),
     homework: await Promise.all(hw.filter(h => h.student === me.id).slice(-15).map(async h => ({ ...h, cn: await nm(h.coach) }))),
-    board: bd.map(u => ({ n: u.n, e: u.e, x: u.x, t: u.t, me: u.id === me.id })),
+    board: bd.filter(u => u.r != null).slice(0, 25).map(u => ({ ...u, me: u.id === me.id })),
   };
   if (me.role !== "player") {
-    const mine = bk.filter(b => b.coach === me.id), sid = [...new Set(mine.filter(b => b.status === "attended").map(b => b.player))];
+    // roster = durable list on the coach record (survives booking-log trimming) + anything still in the log
+    const mine = bk.filter(b => b.coach === me.id), sid = [...new Set([...(me.stu || []), ...mine.filter(b => b.status === "attended").map(b => b.player)])];
     out.coach = {
       bookings: await Promise.all(mine.slice(-30).reverse().map(async b => ({ ...b, pn: await nm(b.player), title: sm.get(b.sid)?.title }))),
-      students: (await Promise.all(sid.map(id => getU(s, id)))).filter(Boolean).map(u => ({ id: u.id, n: u.username, t: tierOf(u) })),
+      students: (await Promise.all(sid.map(id => getU(s, id)))).filter(Boolean).map(u => ({ id: u.id, n: u.username, t: tierOf(u), r: rated(u) ? u.r : null })),
       hw: await Promise.all(hw.filter(h => h.coach === me.id).slice(-30).reverse().map(async h => ({ ...h, sn: await nm(h.student) }))),
       sessions: ss.filter(x => x.coach === me.id && x.status === "open" && x.ts > Date.now() - 36e5).sort((a, b) => a.ts - b.ts).slice(0, 40)
         .map(x => ({ id: x.id, kind: x.kind, ts: x.ts, dur: x.dur || 60, title: x.title, price: x.price, cap: x.cap, booked: live.filter(b => b.sid === x.id).length })),
@@ -228,10 +355,12 @@ async function snapshot(s, me, cfg, full) {
       age: Math.round((Date.now() - m.start) / 6e4), A: [await nm(m.p[0]), await nm(m.p[1])], B: [await nm(m.p[2]), await nm(m.p[3])],
       sub: await Promise.all(Object.entries(m.sub).map(async ([k, v]) => (await nm(k)) + ": " + v.join("-"))) }))) };
     out.admin.flags = await Promise.all(ms.filter(m => m.flag).slice(-8).map(async m => ({ id: m.id, names: await Promise.all(m.p.map(id => nm(id))) })));
-    if (full) out.admin.users = (await loadAll(s)).map(pub);
+    if (full) out.admin.users = (await loadAll(s)).map(u => { const p = pub(u); delete p.hist; return p; });
   }
   return out;
 }
+// games to 11, 15 or 21, win by 2 (extended games end exactly 2 apart)
+const validScore = (x, y) => { const hi = Math.max(x, y), lo = Math.min(x, y); return int(x, 0, 40) && int(y, 0, 40) && hi - lo >= 2 && ([11, 15, 21].includes(hi) || (hi > 11 && hi - lo === 2)); };
 const goodStr = x => typeof x === "string" && TOK.test(x);
 const int = (x, a, b) => Number.isInteger(x) && x >= a && x <= b;
 
@@ -247,6 +376,7 @@ async function handle(req, context) {
     const n = String(b.username || "").toLowerCase(), pw = String(b.password || "");
     if ((await Promise.all([locked(s, "u:" + n, 8, 9e5), locked(s, "i:" + ip, 40, 9e5)])).some(Boolean)) return E("Too many attempts. Try again in 15 minutes.", 429);
     const u = await byName(s, n);
+    if (n === "admin" && !process.env.ADMIN_PASSWORD && (!u || u.defaultPw)) return E(u ? "The default admin password is disabled for security: set ADMIN_PASSWORD in Netlify environment variables, then redeploy" : "Admin not set up: add ADMIN_PASSWORD in Netlify environment variables, then redeploy", 503);
     if (pw.length < 1 || pw.length > 128 || !(await verify(s, u, pw))) { await Promise.all([hit(s, "u:" + n, 9e5), hit(s, "i:" + ip, 9e5)]); return E("bad credentials", 401); }
     if (u.disabled) return E("This account is disabled", 403);
     return J({ token: await token(s, u) });
@@ -254,7 +384,9 @@ async function handle(req, context) {
   if (a === "register") {
     const n = String(b.username || ""), pw = String(b.password || "");
     if (!NAME.test(n) || pw.length < 6 || pw.length > 128) return E("invalid");
-    if (await locked(s, "r:" + ip, 10, 36e5)) return E("Too many sign-ups from this network", 429);
+    if (RESERVED.has(n.toLowerCase())) return E("taken", 409);
+    // Generous enough for a launch night where everyone signs up on the club's Wi-Fi (one shared IP).
+    if (await locked(s, "r:" + ip, 40, 36e5)) return E("Too many sign-ups from this network", 429);
     if (await byName(s, n)) return E("taken", 409);
     await hit(s, "r:" + ip, 36e5);
     const u = newUser(n); await setPw(u, pw);
@@ -268,11 +400,39 @@ async function handle(req, context) {
   const CFGW = ["setCfg", "invite", "redeem"].includes(a);
   const ok = async (msg) => J({ msg: msg || "", ...(await snapshot(s, a === "state" ? me : await getU(s, me.id), CFGW ? { ...DEF, ...(await jget(s, "cfg", {})) } : cfg, !!b.full)) });
 
-  if (a === "state") return ok();
+  if (a === "state") {
+    // one-time backfill of the durable roster for coaches whose students predate v7.2
+    if (me.role !== "player" && !me.stu) {
+      const stu = [...new Set((await jget(s, "bk", [])).filter(x => x.coach === me.id && x.status === "attended").map(x => x.player))];
+      await mutU(s, me.id, u => { if (u.stu) return SKIP; u.stu = stu; });
+      me.stu = stu;
+    }
+    // Queued players' polls run matchmaking (a freed court or an expired cross-tier wait is picked up without another
+    // join), and any poll finishes scores whose confirmation window has passed. matchmake writes nothing when idle.
+    const [q0, m0] = await Promise.all([jget(s, "q", []), jget(s, "m", [])]);
+    if (q0.some(x => x.id === me.id && fresh(x)) || m0.some(m => m.status === "playing" && m.cf && Date.now() - m.cf >= CONFIRM))
+      if (await matchmake(s, cfg).then(() => true, e => console.warn("poll matchmake", e.message))) // re-read: this poll may have just finished our match
+        return J({ msg: "", ...(await snapshot(s, await getU(s, me.id), cfg, !!b.full)) });
+    return ok();
+  }
+  if (a === "players") { // directory search: name contains q; rated players first
+    const q = String(b.q || "").toLowerCase().slice(0, 20);
+    const rows = (await board(s)).filter(u => !q || u.n.toLowerCase().includes(q)).slice(0, 50);
+    return J({ players: rows.map(u => ({ ...u, me: u.id === me.id })) });
+  }
+  if (a === "profile") {
+    const p = await profile(s, String(b.id || ""), String(b.id || "") === me.id);
+    return p ? J({ profile: p }) : E("Player not found", 404);
+  }
   if (a === "survey") { // self-assessed skill profile: 6 traits, each 1-5; retake every 14 days
     const v = Array.isArray(b.v) ? b.v.map(Number) : [];
     if (v.length !== 6 || !v.every(x => int(x, 1, 5))) return E("Answer every question");
-    await mutU(s, me.id, u => { if (u.sk && Date.now() - u.sk.t < 14 * 864e5) throw new Bad("You can retake the survey every 14 days"); u.sk = { v, t: Date.now() }; });
+    await mutU(s, me.id, u => {
+      if (u.sk && Date.now() - u.sk.t < 14 * 864e5) throw new Bad("You can retake the survey every 14 days");
+      u.sk = { v, t: Date.now() };
+      // self-assessment only seeds the provisional rating of a player who hasn't played or been coach-rated yet
+      if (!rated(u) && !(u.ip > 0) && !u.src) u.pr = r3(2 + v.reduce((a, x) => a + x, 0) / 6 * .5);
+    });
     return ok("Skill profile saved");
   }
   if (a === "changePw") {
@@ -280,7 +440,7 @@ async function handle(req, context) {
     if (await locked(s, k, 8, 9e5)) return E("Too many attempts", 429);
     if (np.length < 6 || np.length > 128) return E("Use 6 to 128 characters");
     if (!(await verify(s, me, String(b.oldPw || "")))) { await hit(s, k, 9e5); return E("wrong password"); }
-    let nu; await mutU(s, me.id, async u => { u.tv = (u.tv | 0) + 1; u.defaultPw = false; await setPw(u, np); nu = u; });
+    let nu; await mutU(s, me.id, async u => { u.tv = (u.tv | 0) + 1; u.defaultPw = false; u.mustChange = false; await setPw(u, np); nu = u; });
     return J({ token: await token(s, nu), ...(await snapshot(s, nu, { ...DEF, ...(await jget(s, "cfg", {})) }, !!b.full)), msg: "Password changed" });
   }
 
@@ -299,7 +459,7 @@ async function handle(req, context) {
   }
   if (a === "join") {
     if (Date.now() - me.ci > 4 * 36e5) return E("Check in at the facility first");
-    await expire(s);
+    await expire(s, cfg.tz);
     if ((await jget(s, "m", [])).some(m => m.status !== "done" && m.p.includes(me.id))) return E("You are already in a match");
     await mutate(s, "q", [], q => { const f = q.filter(fresh); if (!f.some(x => x.id === me.id)) f.push({ id: me.id, tier: tierOf(me), t: Date.now() }); return f; });
     await matchmake(s, cfg);
@@ -310,26 +470,36 @@ async function handle(req, context) {
     return ok();
   }
   if (a === "score") {
+    await expire(s, cfg.tz); // a score whose 15-minute window passed counts before anyone can change it
     let plan = null, st;
     await mutate(s, "m", [], async ms => {
       plan = null;
       const m = ms.find(x => x.id === b.matchId);
       if (!m || m.status !== "playing" || !m.p.includes(me.id)) throw new Bad("no active match");
-      const x = +b.a, y = +b.b, hi = Math.max(x, y), lo = Math.min(x, y);
-      if (!int(x, 0, 30) || !int(y, 0, 30) || hi < 11 || (lo <= 9 ? hi !== 11 : hi - lo !== 2)) throw new Bad("Invalid score: first to 11, win by 2");
+      const x = +b.a, y = +b.b;
+      if (!validScore(x, y)) throw new Bad("Invalid score: games to 11, 15 or 21, win by 2");
       if (Date.now() - m.start < cfg.minMin * 6e4) throw new Bad(`Match too short (min ${cfg.minMin} min)`);
       m.sub[me.id] = [x, y]; // [teamA score, teamB score]
-      const subs = Object.entries(m.sub), teamOf = id => (m.p.indexOf(id) < 2 ? 0 : 1);
-      const A = subs.filter(([id]) => teamOf(id) === 0), B = subs.filter(([id]) => teamOf(id) === 1);
-      if (A.length && B.length) {
-        if (A.some(([, v]) => B.some(([, w]) => v[0] !== w[0] || v[1] !== w[1]))) m.status = "disputed";
-        else plan = await planFinish(s, m, A[0][1][0], A[0][1][1], ms, cfg.tz);
-      }
+      const subs = Object.entries(m.sub), v0 = subs[0][1], teamOf = id => (m.p.indexOf(id) < 2 ? 0 : 1);
+      if (subs.some(([, v]) => v[0] !== v0[0] || v[1] !== v0[1])) m.status = "disputed";
+      else if (subs.length === 4) plan = await planFinish(s, m, x, y, ms, cfg.tz);   // everyone confirmed
+      else if (new Set(subs.map(([id]) => teamOf(id))).size === 2) m.cf = m.cf || Date.now(); // both teams agree: clock starts
       st = m.status;
     });
     await applyPlan(s, plan);
     if (st === "done") await matchmake(s, cfg);
-    return ok(st === "done" ? "Score confirmed" : st === "disputed" ? "Scores differ: sent to admin" : "Waiting for the other team to confirm");
+    return ok(st === "done" ? "Score confirmed by all four players" : st === "disputed" ? "Scores differ: sent to the admin to decide"
+      : `Score saved. It counts once everyone confirms, or ${CONFIRM / 6e4} min after both teams agree unless someone rejects it.`);
+  }
+  if (a === "reject") { // any player in the match can reject a submitted score; the admin then decides
+    await expire(s, cfg.tz);
+    await mutate(s, "m", [], ms => {
+      const m = ms.find(x => x.id === b.matchId);
+      if (m && m.status === "done" && m.auto && m.p.includes(me.id)) throw new Bad("Too late: this score already counted after 15 minutes. Ask the admin if it's wrong.");
+      if (!m || m.status !== "playing" || !m.p.includes(me.id) || !Object.keys(m.sub).length) throw new Bad("Nothing to reject");
+      m.status = "disputed"; m.rej = me.id;
+    });
+    return ok("Score rejected: sent to the admin to decide");
   }
 
   // ---- Quests
@@ -351,7 +521,7 @@ async function handle(req, context) {
       if (live.length >= x.cap) throw new Bad("Session is full");
       if (bk.some(v => v.player === me.id && v.status === "booked" && v.ts < x.ts + (x.dur || 60) * 6e4 && x.ts < v.ts + (v.dur || 60) * 6e4)) throw new Bad("You already have a booking at that time");
       bk.push({ id: uid(), sid: x.id, coach: x.coach, player: me.id, kind: x.kind, ts: x.ts, dur: x.dur || 60, made: Date.now(), price: x.price, paid: false, status: "booked" });
-      if (bk.length > 1000) bk.splice(0, bk.length - 1000);
+      trim(bk, 1000, v => (v.status === "booked" && v.ts > Date.now() - 864e5) || (v.price && v.status !== "cancelled"));
     });
     return ok("Booked. Show your booking code to the coach.");
   }
@@ -381,7 +551,7 @@ async function handle(req, context) {
     await mutU(s, me.id, u => { u.role = "certified_coach"; }); await coaches(s, true);
     return ok("You are now a Certified Coach");
   }
-  if (["attend", "assess", "assign", "approve", "addSession", "cancelSession", "paid", "setPay"].includes(a)) {
+  if (["attend", "assess", "assign", "approve", "addSession", "cancelSession", "paid", "setPay", "rate"].includes(a)) {
     if (!coach) return E("forbidden", 403);
     if (a === "setPay") {
       const text = String(b.text || "").trim().slice(0, 120);
@@ -396,7 +566,7 @@ async function handle(req, context) {
         if (ss.some(v => v.coach === me.id && v.status === "open" && v.ts < ts + dur * 6e4 && ts < v.ts + (v.dur || 60) * 6e4)) throw new Bad("That overlaps another of your sessions");
         if (ss.filter(v => v.coach === me.id && v.status === "open" && v.ts > Date.now()).length >= 60) throw new Bad("Too many open sessions");
         ss.push({ id: uid(), coach: me.id, kind, ts, title, price, cap, dur, status: "open" });
-        if (ss.length > 500) ss.splice(0, ss.length - 500);
+        trim(ss, 500, v => v.status === "open" && v.ts > Date.now() - 864e5);
       });
       return ok("Session published");
     }
@@ -419,7 +589,7 @@ async function handle(req, context) {
         if (k.sid && (Date.now() < k.ts - 2 * 36e5 || Date.now() > k.ts + 4 * 36e5)) throw new Bad("Check-in opens 2 hours before the session and closes 4 hours after it starts");
         k.status = "attended"; pid = k.player;
       });
-      await giveXp(s, pid, 40);
+      await Promise.all([giveXp(s, pid, 40), mutU(s, me.id, u => { u.stu = [...new Set([...(u.stu || []), pid])].slice(-500); })]);
       return ok("Checked in: +40 XP to player");
     }
     if (a === "approve") {
@@ -434,7 +604,7 @@ async function handle(req, context) {
     }
     // assess / assign: student must have an attended session with this coach
     const pid = String(b.playerId || ""), bk = await jget(s, "bk", []);
-    if (pid === me.id || !bk.some(x => x.coach === me.id && x.player === pid && x.status === "attended")) return E("Student has no attended session with you");
+    if (pid === me.id || !((me.stu || []).includes(pid) || bk.some(x => x.coach === me.id && x.player === pid && x.status === "attended"))) return E("Student has no attended session with you");
     if (a === "assess") {
       const d = BADGES[b.badge];
       if (!d) return E("Unknown badge");
@@ -447,10 +617,18 @@ async function handle(req, context) {
       });
       return ok(`${d.n} awarded to ${name}`);
     }
+    if (a === "rate") { // like a DUPR coach assessment: a certified coach can give an unrated student a starting rating
+      const v = r3(+b.rating);
+      if (!(v >= 2 && v <= 6)) return E("Starting rating must be between 2.000 and 6.000");
+      let name;
+      await mutU(s, pid, u => { if (rated(u)) throw new Bad("This player already has a rating. Coaches only set starting ratings."); u.r = v; u.pr = v; u.src = "coach"; u.rc = me.id; name = u.username; });
+      await board(s, true);
+      return ok(`${name} starts at ${v.toFixed(3)}`);
+    }
     if (a === "assign") {
       const t = String(b.title || "").trim().slice(0, 120), xp = Math.min(100, Math.max(10, +b.xp | 0 || 30));
       if (!t) return E("Title required");
-      await mutate(s, "hw", [], hw => { hw.push({ id: uid(), coach: me.id, student: pid, title: t, xp, status: "open", ts: Date.now() }); if (hw.length > 1000) hw.splice(0, hw.length - 1000); });
+      await mutate(s, "hw", [], hw => { hw.push({ id: uid(), coach: me.id, student: pid, title: t, xp, status: "open", ts: Date.now() }); trim(hw, 1000, v => v.status === "open"); });
       return ok("Homework assigned");
     }
   }
@@ -463,16 +641,17 @@ async function handle(req, context) {
     await mutU(s, id, u => { u.role = b.role; }); await coaches(s, true);
     return ok("Role updated");
   }
-  if (a === "resetElo") {
-    await mutU(s, String(b.id || ""), u => { u.elo = 1000; });
-    return ok("Rank reset");
+  if (a === "resetElo") { // reset rating: the player goes back to NR and re-initializes
+    await mutU(s, String(b.id || ""), u => { delete u.r; delete u.f; delete u.src; u.pr = NR_ASSUME; u.ip = 0; });
+    await board(s, true);
+    return ok("Rating reset: player is NR again");
   }
   if (a === "resolve") {
     let plan = null;
     await mutate(s, "m", [], async ms => {
       plan = null;
       const m = ms.find(x => x.id === b.matchId && x.status === "disputed"), x = +b.a, y = +b.b;
-      if (!m || !int(x, 0, 30) || !int(y, 0, 30) || x === y) throw new Bad("invalid");
+      if (!m || !validScore(x, y)) throw new Bad("Enter a valid final score: games to 11, 15 or 21, win by 2");
       plan = await planFinish(s, m, x, y, ms, cfg.tz);
     });
     await applyPlan(s, plan); await matchmake(s, cfg);
@@ -482,9 +661,17 @@ async function handle(req, context) {
   if (a === "setDisabled") {
     const id = String(b.id || "");
     if (id === me.id) return E("invalid");
-    await mutU(s, id, u => { u.disabled = !!b.disabled; }); await coaches(s, true);
+    await mutU(s, id, u => { u.disabled = !!b.disabled; }); await Promise.all([coaches(s, true), board(s, true)]);
     await mutate(s, "q", [], q => q.filter(x => x.id !== id));
     return ok(b.disabled ? "User disabled" : "User enabled");
+  }
+  if (a === "resetPw") { // forgotten password: admin issues a temporary one, all of that user's sessions end
+    const id = String(b.id || "");
+    if (id === me.id) return E("Use Change password on the Me tab for your own account");
+    const tmp = randomBytes(6).toString("base64url").replace(/[-_]/g, "x");
+    let name; await mutU(s, id, async u => { u.tv = (u.tv | 0) + 1; u.mustChange = true; await setPw(u, tmp); name = u.username; });
+    await s.delete(rk("u:" + name.toLowerCase())); // clear any login lockout for that name
+    return ok(`Temporary password for ${name}: ${tmp}`);
   }
   if (a === "voidMatch") {
     await mutate(s, "m", [], ms => { const m = ms.find(x => x.id === b.matchId && x.status !== "done"); if (!m) throw new Bad("invalid"); m.status = "done"; m.void = true; m.end = Date.now(); });
