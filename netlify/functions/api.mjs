@@ -412,9 +412,10 @@ async function history(s, u, max = 50) {
 async function profile(s, id, self) {
   const u = await getU(s, id);
   if (!u || (!self && (u.disabled || u.role === "admin"))) return null;
-  const cls = (await jget(s, "cl", [])).filter(c => isMember(c, u.id)).map(clubRef);
-  const hs = await history(s, u), ids = [...new Set(hs.flatMap(h => [h.pt, ...h.op]))];
-  const names = new Map(await Promise.all(ids.map(async i => [i, (await getU(s, i))?.username || "Former player"])));
+  const [cl, hs, rows] = await Promise.all([jget(s, "cl", []), history(s, u), board(s)]);
+  const cls = cl.filter(c => isMember(c, u.id)).map(clubRef), ids = [...new Set(hs.flatMap(h => [h.pt, ...h.op]))], known = new Map(rows.map(r => [r.id, r.n]));
+  // one cached board read covers most names; only players missing from it (disabled, brand new) cost a user read
+  const names = new Map(await Promise.all(ids.map(async i => [i, known.get(i) || (await getU(s, i))?.username || "Former player"])));
   return { id: u.id, n: u.username, r: rated(u) ? u.r : null, pr: rated(u) ? null : rtg(u), ip: u.ip || 0, rel: reliability(u), w: u.w | 0, l: u.l | 0,
     t: tierOf(u), badges: u.badges, coach: u.role === "certified_coach", src: u.src || null, since: u.created, sk: u.sk || null, xp: u.xp,
     clubs: cls,
@@ -426,18 +427,31 @@ async function coaches(s, force) {
   return c;
 }
 // ---- Clubs ----
-// One list "cl": {id, name, desc, owner, on (owner name), made, m: [{id, at}]}. Any player or coach can create clubs and join several.
+// One list "cl": {id, name, desc, rules, loc, ap (owner approves joiners), ho (only the owner hosts), rq: [{id, n, at}], owner, on (owner name), made, m: [{id, at}]}. Any player or coach can create clubs and join several.
 // Every open play belongs to one of the host's clubs. Club ranking = average club rating of the members who have one (NR players don't count).
 const CLNAME = /^[A-Za-z0-9 _.&'-]{3,30}$/;
 const isMember = (c, id) => c.m.some(x => x.id === id);
 const clubRef = c => ({ id: c.id, n: c.name });
+const canHost = (c, id) => !c.ho || c.owner === id;
+// Only the fields the caller actually sent: an update with just a name must not reset the rest.
+function clubFields(b) {
+  const has = k => b[k] !== undefined && b[k] !== null, f = {};
+  if (has("desc")) f.desc = String(b.desc).trim().slice(0, 200);
+  if (has("rules")) f.rules = String(b.rules).trim().slice(0, 1000);
+  if (has("loc")) f.loc = String(b.loc).trim().slice(0, 60);
+  if (has("ap")) f.ap = b.ap === true;
+  if (has("ho")) f.ho = b.ho === true;
+  return f;
+}
+const CLDEFAULTS = { desc: "", rules: "", loc: "", ap: false, ho: false };
+const cleanName = x => String(x || "").trim().replace(/\s+/g, " ");
 function clubStats(c, rows) {
   const by = new Map(rows.map(r => [r.id, r])), act = c.m.map(x => by.get(x.id)).filter(Boolean), rated = act.filter(r => r.r != null);
   return { act, n: act.length, rn: rated.length, avg: rated.length ? r3(rated.reduce((t, r) => t + r.r, 0) / rated.length) : null };
 }
 async function clubBoard(s, me) {
   const [cl, rows] = await Promise.all([jget(s, "cl", []), board(s)]);
-  return cl.map(c => { const st = clubStats(c, rows); return { id: c.id, n: c.name, d: c.desc, on: c.on, m: st.n, rm: st.rn, avg: st.avg, joined: isMember(c, me.id), mine: c.owner === me.id }; })
+  return cl.map(c => { const st = clubStats(c, rows); return { id: c.id, n: c.name, d: c.desc, loc: c.loc || "", ap: !!c.ap, on: c.on, m: st.n, rm: st.rn, avg: st.avg, joined: isMember(c, me.id), req: (c.rq || []).some(x => x.id === me.id), mine: c.owner === me.id }; })
     .sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1) || b.m - a.m || a.n.localeCompare(b.n));
 }
 async function clubDetail(s, me, id) {
@@ -445,13 +459,15 @@ async function clubDetail(s, me, id) {
   const c = cl.find(x => x.id === id);
   if (!c) throw new Bad("Club not found", 404);
   const st = clubStats(c, rows);
-  return { id: c.id, n: c.name, d: c.desc, on: c.on, owner: c.owner, isOwner: c.owner === me.id, joined: isMember(c, me.id), made: c.made, m: st.n, rm: st.rn, avg: st.avg,
+  const mgr = c.owner === me.id || me.role === "admin";
+  return { id: c.id, n: c.name, d: c.desc, rules: c.rules || "", loc: c.loc || "", ap: !!c.ap, ho: !!c.ho, canHost: canHost(c, me.id), on: c.on, owner: c.owner, isOwner: c.owner === me.id, mgr, joined: isMember(c, me.id),
+    requested: (c.rq || []).some(x => x.id === me.id), rq: mgr ? (c.rq || []).map(x => ({ id: x.id, n: x.n, at: x.at })) : [], made: c.made, m: st.n, rm: st.rn, avg: st.avg,
     mem: st.act.map(r => ({ id: r.id, n: r.n, r: r.r, rel: r.rel, w: r.w, l: r.l, c: !!r.c, o: r.id === c.owner })).sort((a, b) => (b.r ?? -1) - (a.r ?? -1) || a.n.localeCompare(b.n)),
     ops: ops.filter(e => e.club === id && OPLIVE(e)).sort((a, b) => a.ts - b.ts).map(e => opLine(e, me)) };
 }
-async function snapshot(s, me, cfg, full) {
+async function snapshot(s, me, cfg, full, pre = {}) {
   const names = new Map(), nm = id => { if (!names.has(id)) names.set(id, getU(s, id).then(u => u?.username || "?")); return names.get(id); };
-  const [ms, q, bk, hw, co, bd, ss, fr, ops, cls] = await Promise.all([jget(s, "m", []), jget(s, "q", []), jget(s, "bk", []), jget(s, "hw", []), coaches(s), board(s), jget(s, "ss", []), frOf(s, me.id), jget(s, "op", []), jget(s, "cl", [])]);
+  const [ms, q, bk, hw, co, bd, ss, fr, ops, cls] = await Promise.all([pre.m || jget(s, "m", []), pre.q || jget(s, "q", []), jget(s, "bk", []), jget(s, "hw", []), coaches(s), board(s), jget(s, "ss", []), frOf(s, me.id), jget(s, "op", []), jget(s, "cl", [])]);
   const qf = q.filter(fresh), live = bk.filter(b => b.status !== "cancelled"), sm = new Map(ss.map(x => [x.id, x])), cn = new Map(co.map(c => [c.id, c.n])), cp = new Map(co.map(c => [c.id, c.pay]));
   const mm = ms.filter(m => m.p.includes(me.id) && m.status !== "done" && Date.now() - m.start < 3 * 36e5).pop();
   const out = {
@@ -481,8 +497,13 @@ async function snapshot(s, me, cfg, full) {
     homework: await Promise.all(hw.filter(h => h.student === me.id).slice(-15).map(async h => ({ ...h, cn: await nm(h.coach) }))),
     board: bd.filter(u => u.r != null).slice(0, 25).map(u => ({ ...u, me: u.id === me.id })),
     friends: { f: fr.f.slice().sort((a, b) => (b.lm | 0) - (a.lm | 0) || a.n.localeCompare(b.n)), i: fr.i, o: fr.o }, unread: fr.f.reduce((t, x) => t + (x.un | 0), 0),
-    myClubs: cls.filter(c => isMember(c, me.id)).map(c => ({ ...clubRef(c), o: c.owner === me.id })),
-    ops: ops.filter(e => OPLIVE(e) || (OPRECENT(e) && e.pl.some(x => x.id === me.id))).sort((a, b) => (b.status === "live") - (a.status === "live") || a.ts - b.ts).slice(0, 40).map(e => opLine(e, me)),
+    myClubs: cls.filter(c => isMember(c, me.id)).map(c => ({ ...clubRef(c), o: c.owner === me.id, h: canHost(c, me.id) })),
+    ops: [
+      ...ops.filter(OPLIVE).sort((a, b) => (b.status === "live") - (a.status === "live") || a.ts - b.ts).slice(0, 40),
+      // finished open plays are public for the retention window, not just for the host and players
+      ...ops.filter(e => OPRECENT(e) && e.status === "cancelled").sort((a, b) => b.ts - a.ts).slice(0, 20),
+      ...ops.filter(e => OPRECENT(e) && e.status === "ended").sort((a, b) => b.ts - a.ts).slice(0, 20),
+    ].map(e => opLine(e, me)),
   };
   if (me.role !== "player") {
     // roster = durable list on the coach record (survives booking-log trimming) + anything still in the log
@@ -560,7 +581,7 @@ async function handle(req, context) {
     if (q0.some(x => x.id === me.id && fresh(x)) || m0.some(m => m.status === "playing" && m.cf && Date.now() - m.cf >= CONFIRM))
       if (await matchmake(s, cfg).then(() => true, e => console.warn("poll matchmake", e.message))) // re-read: this poll may have just finished our match
         return J({ msg: "", ...(await snapshot(s, await getU(s, me.id), cfg, !!b.full)) });
-    return ok();
+    return J({ msg: "", ...(await snapshot(s, me, cfg, !!b.full, { q: q0, m: m0 })) });
   }
   if (a === "players") { // directory search: name contains q; rated players first
     const q = String(b.q || "").toLowerCase().slice(0, 20);
@@ -743,19 +764,53 @@ async function handle(req, context) {
     return thread(s, me, id);
   }
 
+  // ---- Group chats: one per club (members only) and one per open play (host and joined players)
+  if (a === "gcGet" || a === "gcSend") {
+    const kind = String(b.kind || ""), id = String(b.id || "");
+    if (!ID.test(id) || (kind !== "club" && kind !== "op")) return E("invalid");
+    let title = "";
+    if (kind === "club") {
+      const c = (await jget(s, "cl", [])).find(x => x.id === id);
+      if (!c) return E("Club not found", 404);
+      if (!isMember(c, me.id)) return E("Join the club to use its chat", 403);
+      title = c.name;
+    } else {
+      const e = (await jget(s, "op", [])).find(x => x.id === id);
+      if (!e) return E("Open play not found", 404);
+      if (e.host !== me.id && !e.pl.some(x => x.id === me.id && !x.left)) return E("Join the open play to use its chat", 403);
+      if (e.club && e.host !== me.id) { // approval-only clubs: the open play's chat is for club members only
+        const c = (await jget(s, "cl", [])).find(x => x.id === e.club);
+        if (c && c.ap && !isMember(c, me.id)) return E("Join the club to use this open play's chat", 403);
+      }
+      title = e.title;
+    }
+    const key = `gc/${kind}_${id}`;
+    if (a === "gcGet") {
+      const m = await jget(s, key, []), since = +b.since || 0;
+      if (since && (m.at(-1)?.t || 0) <= since) return J({ same: true, title });
+      return J({ title, msgs: m.slice(-100) });
+    }
+    const text = String(b.text || "").trim().slice(0, 500);
+    if (!text) return E("Type a message first");
+    if (await locked(s, "ch:" + me.id, 30, 6e4)) return E("Slow down a little", 429);
+    await hit(s, "ch:" + me.id, 6e4);
+    let msgs;
+    await mutate(s, key, [], m => { m.push({ f: me.id, n: me.username, t: Date.now(), x: text }); if (m.length > 200) m.splice(0, m.length - 200); msgs = m.slice(-100); });
+    return J({ title, msgs });
+  }
   // ---- Clubs
   if (a === "clubs") return J({ clubs: await clubBoard(s, me) });
   if (a.startsWith("club")) {
     const id = String(b.id || "");
     if (a === "clubCreate") {
-      const name = String(b.name || "").trim().replace(/\s+/g, " "), desc = String(b.desc || "").trim().slice(0, 200);
+      const name = cleanName(b.name), f = clubFields(b);
       if (!CLNAME.test(name)) return E("Club names are 3-30 characters: letters, numbers, spaces and . _ & ' -");
       let made;
       await mutate(s, "cl", [], list => {
         if (list.length >= 500) throw new Bad("Too many clubs right now. Try again later.");
         if (list.some(c => c.name.toLowerCase() === name.toLowerCase())) throw new Bad("That club name is taken", 409);
         if (list.filter(c => c.owner === me.id).length >= 5) throw new Bad("You can own up to 5 clubs");
-        list.push(made = { id: uid(), name, desc, owner: me.id, on: me.username, made: Date.now(), m: [{ id: me.id, at: Date.now() }] });
+        list.push(made = { id: uid(), name, ...CLDEFAULTS, ...f, rq: [], owner: me.id, on: me.username, made: Date.now(), m: [{ id: me.id, at: Date.now() }] });
       });
       return ok(`Club "${name}" created`, { club: await clubDetail(s, me, made.id) });
     }
@@ -767,18 +822,24 @@ async function handle(req, context) {
         const c = list.find(x => x.id === id);
         if (!c) throw new Bad("Club not found", 404);
         if (isMember(c, me.id)) throw new Bad("You're already in this club");
+        if (c.ap) {
+          c.rq = c.rq || [];
+          if (c.rq.some(x => x.id === me.id)) throw new Bad("Your request is already waiting for the owner");
+          if (c.rq.length >= 100) throw new Bad("This club has too many waiting requests. Try again later.");
+          c.rq.push({ id: me.id, n: me.username, at: Date.now() }); msg = "Request sent. The club owner will review it.";
+          return;
+        }
         if (c.m.length >= 300) throw new Bad("This club is full");
-        c.m.push({ id: me.id, at: Date.now() });
+        c.m.push({ id: me.id, at: Date.now() }); msg = "You joined the club";
       });
-      msg = "You joined the club";
     } else if (a === "clubLeave") {
       await mutate(s, "cl", [], list => {
         const c = list.find(x => x.id === id);
+        if (c && (c.rq || []).some(x => x.id === me.id)) { c.rq = c.rq.filter(x => x.id !== me.id); msg = "Request cancelled"; return; }
         if (!c || !isMember(c, me.id)) throw new Bad("You're not in this club");
         if (c.owner === me.id) throw new Bad("The owner can't leave. Delete the club instead.");
-        c.m = c.m.filter(x => x.id !== me.id);
+        c.m = c.m.filter(x => x.id !== me.id); msg = "You left the club";
       });
-      msg = "You left the club";
     } else if (a === "clubKick") {
       const pid = String(b.pid || "");
       await mutate(s, "cl", [], list => {
@@ -789,6 +850,33 @@ async function handle(req, context) {
         c.m = c.m.filter(x => x.id !== pid);
       });
       msg = "Player removed from the club";
+    } else if (a === "clubApprove" || a === "clubDecline") {
+      const pid = String(b.pid || "");
+      await mutate(s, "cl", [], list => {
+        const c = list.find(x => x.id === id);
+        if (!c) throw new Bad("Club not found", 404);
+        if (c.owner !== me.id && !admin) throw new Bad("Only the club owner can do that", 403);
+        const r = (c.rq || []).find(x => x.id === pid);
+        if (!r) throw new Bad("That request is gone");
+        if (a === "clubApprove" && !isMember(c, pid)) { if (c.m.length >= 300) throw new Bad("This club is full"); c.m.push({ id: pid, at: Date.now() }); }
+        c.rq = c.rq.filter(x => x.id !== pid);
+      });
+      msg = a === "clubApprove" ? "Player approved" : "Request declined";
+    } else if (a === "clubUpdate") {
+      const f = clubFields(b), sent = b.name !== undefined && b.name !== null, newName = cleanName(b.name);
+      if (sent && !CLNAME.test(newName)) return E("Club names are 3-30 characters: letters, numbers, spaces and . _ & ' -");
+      let name = newName;
+      await mutate(s, "cl", [], list => {
+        const c = list.find(x => x.id === id);
+        if (!c) throw new Bad("Club not found", 404);
+        if (c.owner !== me.id && !admin) throw new Bad("Only the club owner can do that", 403);
+        name = sent ? newName : c.name;
+        if (list.some(x => x.id !== id && x.name.toLowerCase() === name.toLowerCase())) throw new Bad("That club name is taken", 409);
+        Object.assign(c, f, { name });
+        if (!c.ap) c.rq = []; // turning approval off clears the waiting list
+      });
+      await mutate(s, "op", [], list => { let ch = false; list.forEach(e => { if (e.club === id && e.cn !== name) { e.cn = name; ch = true; } }); return ch ? undefined : SKIP; });
+      msg = "Club saved";
     } else if (a === "clubDelete") {
       if ((await jget(s, "op", [])).some(e => e.club === id && OPLIVE(e))) return E("This club still has open plays running. End or cancel them first.");
       await mutate(s, "cl", [], list => {
@@ -797,6 +885,7 @@ async function handle(req, context) {
         if (list[i].owner !== me.id && !admin) throw new Bad("Only the club owner can do that", 403);
         list.splice(i, 1);
       });
+      await s.delete("gc/club_" + id).catch(() => {});
       return ok("Club deleted");
     } else return E("unknown action");
     return ok(msg, { club: await clubDetail(s, me, id) });
@@ -815,14 +904,17 @@ async function handle(req, context) {
     const cl = (await jget(s, "cl", [])).find(c => c.id === club);
     if (!cl) return E("Club not found", 404);
     if (!isMember(cl, me.id)) return E("Join this club before hosting an open play for it", 403);
+    if (!canHost(cl, me.id)) return E("Only the club owner can host open plays for this club", 403);
     let made;
+    const gone = new Set();
     await mutate(s, "op", [], list => {
-      for (let i = list.length; i--;) if (!OPLIVE(list[i]) && !OPRECENT(list[i])) list.splice(i, 1); // housekeeping
+      for (let i = list.length; i--;) if (!OPLIVE(list[i]) && !OPRECENT(list[i])) gone.add(list.splice(i, 1)[0].id); // housekeeping
       if (list.filter(e => e.host === me.id && OPLIVE(e)).length >= 5) throw new Bad("You already have 5 open plays running");
       if (list.length >= 300) throw new Bad("Too many open plays right now. Try again later.");
       list.push(made = { id: uid(), host: me.id, hn: me.username, club: cl.id, cn: cl.name, mode, title, desc, loc, ts, dur, price, pay, cap, courts, rounds, status: "open", made: Date.now(), seq: 0,
         pl: [{ id: me.id, n: me.username, j: Date.now(), paid: true }], g: [] }); // the host plays too and doesn't pay themselves
     });
+    await Promise.all([...gone].map(i => s.delete("gc/op_" + i).catch(() => {})));
     return ok("Open play published", { od: opDetail(made, me) });
   }
   if (a.startsWith("op") && a !== "opCreate") {
@@ -836,8 +928,12 @@ async function handle(req, context) {
       return J({ od: opDetail(e, me) });
     }
     if (a === "opJoin") {
-      e = await mutOp(s, id, e => {
+      e = await mutOp(s, id, async e => {
         if (e.status !== "open" && e.status !== "live") throw new Bad("This open play is closed");
+        if (e.club && e.host !== me.id) {
+          const c = (await jget(s, "cl", [])).find(x => x.id === e.club);
+          if (c && c.ap && !isMember(c, me.id)) throw new Bad("This club approves its members. Join the club first, then you can join its open plays.", 403);
+        }
         if (e.pl.some(x => x.id === me.id && !x.left)) throw new Bad("You already joined");
         if (e.pl.filter(x => !x.left).length >= e.cap) throw new Bad("This open play is full");
         e.pl = e.pl.filter(x => x.id !== me.id); // rejoining after leaving starts fresh

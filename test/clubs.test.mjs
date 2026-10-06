@@ -97,3 +97,70 @@ test("club ranking is the average rating of the rated players in each club", asy
   assert.deepEqual(d.mem.map(m => m.n), ["bob", "ann", "dee"], "members listed by rating");
   assert.equal((await call("profile", { id: ID.ann }, "owny")).body.profile.clubs.length, 2);
 });
+
+test("owners edit a club, set rules, approval and host policy; renaming updates its open plays", async () => {
+  const { ID, call } = await setup();
+  const club = (await call("clubCreate", { name: "Rules Club", rules: "Be on time.", loc: "Riverside", ap: true, ho: true }, "owny")).body.club;
+  assert.equal(club.rules, "Be on time.");
+  assert.equal(club.ap, true);
+  assert.equal((await call("clubUpdate", { id: club.id, name: "Rules Club" }, "ann")).status, 403, "only the owner edits");
+  // approval: a request is not a membership until the owner approves
+  const req = await call("clubJoin", { id: club.id }, "ann");
+  assert.equal(req.status, 200);
+  assert.equal(req.body.club.joined, false);
+  assert.equal(req.body.club.requested, true);
+  assert.equal((await call("clubJoin", { id: club.id }, "ann")).status, 400, "no duplicate requests");
+  assert.equal((await call("gcGet", { kind: "club", id: club.id }, "ann")).status, 403, "requesting is not enough for the chat");
+  assert.equal((await call("clubGet", { id: club.id }, "owny")).body.club.rq.length, 1);
+  assert.equal((await call("clubGet", { id: club.id }, "ann")).body.club.rq.length, 0, "only managers see requests");
+  assert.equal((await call("clubApprove", { id: club.id, pid: ID.ann }, "bob")).status, 403);
+  assert.equal((await call("clubDecline", { id: club.id, pid: ID.ann }, "owny")).status, 200);
+  await call("clubJoin", { id: club.id }, "ann");
+  assert.equal((await call("clubApprove", { id: club.id, pid: ID.ann }, "owny")).status, 200);
+  assert.equal((await call("clubGet", { id: club.id }, "ann")).body.club.joined, true, "approved players are members");
+  assert.equal((await call("clubGet", { id: club.id }, "ann")).body.club.requested, false);
+  // host policy: owner only
+  assert.equal((await call("opCreate", mkOp(club.id), "ann")).status, 403, "members can't host when the rules say owner only");
+  const op = await call("opCreate", mkOp(club.id), "owny");
+  assert.equal(op.status, 200);
+  // edit: new name, rules, anyone may host from now on
+  const saved = await call("clubUpdate", { id: club.id, name: "Renamed Club", rules: "New rules", ap: false, ho: false }, "owny");
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.club.n, "Renamed Club");
+  assert.equal(saved.body.club.rules, "New rules");
+  assert.equal((await call("state", {}, "owny")).body.ops[0].cn, "Renamed Club", "open plays follow the new name");
+  assert.equal((await call("opCreate", mkOp(club.id), "ann")).status, 200);
+  assert.equal((await call("clubUpdate", { id: club.id, name: "x" }, "owny")).status, 400);
+  await mkClub(call, "bob", "Taken Name");
+  assert.equal((await call("clubUpdate", { id: club.id, name: "taken name" }, "owny")).status, 409);
+});
+
+test("group chats: one per club for members, one per open play for its host and players", async () => {
+  const { call } = await setup();
+  const club = await mkClub(call, "owny", "Chat Club");
+  await call("clubJoin", { id: club.id }, "ann");
+  assert.equal((await call("gcGet", { kind: "club", id: club.id }, "bob")).status, 403, "non-members can't read");
+  assert.equal((await call("gcSend", { kind: "club", id: club.id, text: "hi" }, "bob")).status, 403, "or write");
+  assert.equal((await call("gcSend", { kind: "club", id: club.id, text: "  " }, "ann")).status, 400, "empty messages refused");
+  let r = await call("gcSend", { kind: "club", id: club.id, text: "Who is in on Saturday?" }, "ann");
+  assert.equal(r.status, 200);
+  assert.equal(r.body.msgs.length, 1);
+  assert.equal(r.body.msgs[0].n, "ann");
+  const seen = (await call("gcGet", { kind: "club", id: club.id }, "owny")).body.msgs;
+  assert.equal(seen[0].x, "Who is in on Saturday?");
+  assert.equal((await call("gcGet", { kind: "club", id: club.id, since: seen[0].t }, "owny")).body.same, true, "polling returns nothing new");
+  // each open play has its own chat
+  const one = (await call("opCreate", mkOp(club.id, { title: "Saturday" }), "owny")).body.od.id;
+  const two = (await call("opCreate", mkOp(club.id, { title: "Sunday" }), "owny")).body.od.id;
+  assert.equal((await call("gcGet", { kind: "op", id: one }, "ann")).status, 403, "not joined yet");
+  await call("opJoin", { id: one }, "ann");
+  await call("gcSend", { kind: "op", id: one, text: "Court 1 is booked" }, "owny");
+  await call("gcSend", { kind: "op", id: one, text: "Great, see you there" }, "ann");
+  assert.equal((await call("gcGet", { kind: "op", id: one }, "ann")).body.msgs.length, 2);
+  assert.equal((await call("gcGet", { kind: "op", id: two }, "owny")).body.msgs.length, 0, "chats don't mix");
+  await call("opLeave", { id: one }, "ann");
+  assert.equal((await call("gcGet", { kind: "op", id: one }, "ann")).status, 403, "leaving takes you out of the chat");
+  assert.equal((await call("gcGet", { kind: "team", id: one }, "owny")).status, 400);
+  await call("clubLeave", { id: club.id }, "ann");
+  assert.equal((await call("gcGet", { kind: "club", id: club.id }, "ann")).status, 403, "leaving the club takes you out of its chat");
+});
