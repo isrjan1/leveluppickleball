@@ -26,7 +26,7 @@ test("usernames are unique case-insensitively; tokens die on password change", a
   assert.equal((await c.call("state", {}, r.token)).status, 200);
 });
 
-test("four checked-in players get a balanced match; confirmed score moves XP and Elo once", async () => {
+test("four checked-in players get a balanced match; a score confirmed by all four moves rating and XP once", async () => {
   const c = await fresh(ADMIN);
   const ts = [];
   for (const n of ["ana", "ben", "cai", "dee"]) ts.push(await c.player(n, ip()));
@@ -40,15 +40,21 @@ test("four checked-in players get a balanced match; confirmed score moves XP and
   assert.equal((await c.call("score", { matchId: id, a: 11, b: 5 }, ts[0])).status, 400, "minimum match time enforced");
   advance(6 * MIN);
   assert.equal((await c.call("score", { matchId: id, a: 11, b: 10 }, ts[0])).status, 400, "win by 2");
+  assert.equal((await c.call("score", { matchId: id, a: 12, b: 5 }, ts[0])).status, 400, "games end at 11, 15 or 21");
   const aTok = ts[teams.indexOf("A")], bTok = ts[teams.indexOf("B")];
   await c.ok("score", { matchId: id, a: 11, b: 5 }, aTok);
-  const done = await c.ok("score", { matchId: id, a: 11, b: 5 }, bTok);
-  assert.equal(done.msg, "Score confirmed");
+  const half = await c.ok("score", { matchId: id, a: 11, b: 5 }, bTok);
+  assert.match(half.msg, /counts once everyone confirms/);
+  for (const t of ts.filter(t => t !== aTok && t !== bTok)) await c.ok("score", { matchId: id, a: 11, b: 5 }, t);
   const states = await Promise.all(ts.map(t => c.ok("state", {}, t)));
   for (let i = 0; i < 4; i++) {
     const me = states[i].me;
-    if (teams[i] === "A") { assert.equal(me.w, 1); assert.equal(me.xp, 30); assert.equal(me.elo, 1016); }
-    else { assert.equal(me.l, 1); assert.equal(me.xp, 10); assert.equal(me.elo, 984); }
+    // all four are new (NR, provisional 3.5 from an all-3 survey); 11-5 beats the expected 50% share by 0.1875,
+    // x K 1 (new player) x 0.5 (no rated opponents) = 0.094
+    if (teams[i] === "A") { assert.equal(me.w, 1); assert.equal(me.xp, 30); assert.equal(me.pr, 3.594); }
+    else { assert.equal(me.l, 1); assert.equal(me.xp, 10); assert.equal(me.pr, 3.406); }
+    assert.equal(me.r, undefined, "still NR after one match");
+    assert.equal(me.hist.length, 1);
     assert.equal(states[i].match, null);
   }
   assert.equal((await c.call("score", { matchId: id, a: 11, b: 5 }, aTok)).status, 400, "cannot score a finished match");
