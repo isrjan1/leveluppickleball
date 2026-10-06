@@ -53,3 +53,6 @@ v8.4 (Club tab, leaderboard, group chats):
 - **Open play group chat** on every open play, for the host and joined players. Leaving the open play or the club removes access. Chats of old open plays are deleted with the open play. API actions: gcGet, gcSend (kind club or op), clubUpdate, clubApprove, clubDecline.
 
 v8.5 (UI): dark theme by default with a Light option (top bar, login screen, Me > Appearance; saved per device); pickleball-rolling loader on login, sign-up, saved-session resume and logout; adaptive layout (small phone, phone, tablet, desktop with side navigation, wide desktop).
+
+
+v8.7 (look and profile pictures): dark theme accent is now gold #FEBC17 and every blue is gone (surfaces are neutral charcoal in both themes, avatar colours no longer use blue). Players can upload, change (move and zoom in a circle crop) and remove a profile picture on Me > Profile picture. The browser saves a 256 px JPEG; the server keeps it in the blob `av/<userId>` with a version stamp on the user (`av`). Photos show everywhere a player avatar appears and fall back to initials. API: actions setAvatar (img = data URL, max about 120 KB, 12 changes per hour) and removeAvatar; GET /api?avatar=<username>&v=<version> serves the image (public, cached for a year because the version is part of the URL; disabled users return 404).

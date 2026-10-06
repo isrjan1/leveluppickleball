@@ -377,7 +377,7 @@ async function board(s, force) {
   const c = force ? null : await jget(s, "board", null);
   if (c && c.v === 2 && Date.now() - c.t < 6e4) return c.rows;
   const rows = (await loadAll(s)).filter(u => u.role !== "admin" && !u.disabled)
-    .map(u => ({ id: u.id, n: u.username, r: rated(u) ? u.r : null, rel: reliability(u), x: u.xp, t: tierOf(u), w: u.w | 0, l: u.l | 0, c: u.role === "certified_coach" || undefined }))
+    .map(u => ({ id: u.id, n: u.username, r: rated(u) ? u.r : null, rel: reliability(u), x: u.xp, t: tierOf(u), w: u.w | 0, l: u.l | 0, c: u.role === "certified_coach" || undefined, a: u.av || undefined }))
     .sort((a, b) => (b.r ?? -1) - (a.r ?? -1) || a.n.localeCompare(b.n));
   await s.setJSON("board", { v: 2, t: Date.now(), rows });
   return rows;
@@ -416,7 +416,7 @@ async function profile(s, id, self) {
   const cls = cl.filter(c => isMember(c, u.id)).map(clubRef), ids = [...new Set(hs.flatMap(h => [h.pt, ...h.op]))], known = new Map(rows.map(r => [r.id, r.n]));
   // one cached board read covers most names; only players missing from it (disabled, brand new) cost a user read
   const names = new Map(await Promise.all(ids.map(async i => [i, known.get(i) || (await getU(s, i))?.username || "Former player"])));
-  return { id: u.id, n: u.username, r: rated(u) ? u.r : null, pr: rated(u) ? null : rtg(u), ip: u.ip || 0, rel: reliability(u), w: u.w | 0, l: u.l | 0,
+  return { id: u.id, n: u.username, a: u.av || undefined, r: rated(u) ? u.r : null, pr: rated(u) ? null : rtg(u), ip: u.ip || 0, rel: reliability(u), w: u.w | 0, l: u.l | 0,
     t: tierOf(u), badges: u.badges, coach: u.role === "certified_coach", src: u.src || null, since: u.created, sk: u.sk || null, xp: u.xp,
     clubs: cls,
     hist: hs.map(h => ({ t: h.t, s: h.s, d: h.d, w: h.w, nr: !!h.nr, ex: h.ex, k: h.k, ot: h.ot, pt: names.get(h.pt), op: h.op.map(i => names.get(i)) })) };
@@ -471,7 +471,7 @@ async function snapshot(s, me, cfg, full, pre = {}) {
   const qf = q.filter(fresh), live = bk.filter(b => b.status !== "cancelled"), sm = new Map(ss.map(x => [x.id, x])), cn = new Map(co.map(c => [c.id, c.n])), cp = new Map(co.map(c => [c.id, c.pay]));
   const mm = ms.filter(m => m.p.includes(me.id) && m.status !== "done" && Date.now() - m.start < 3 * 36e5).pop();
   const out = {
-    me: pub(me), qr: !!cfg.qr, tiers: TIERS, badgeDefs: BADGES, today: todays(cfg.tz).map(x => ({ ...x, done: me.done.includes(x.id) })),
+    me: pub(me), avs: Object.fromEntries(bd.filter(r => r.a).map(r => [r.n, r.a])), qr: !!cfg.qr, tiers: TIERS, badgeDefs: BADGES, today: todays(cfg.tz).map(x => ({ ...x, done: me.done.includes(x.id) })),
     checked: Date.now() - me.ci < 4 * 36e5, inQueue: qf.some(x => x.id === me.id), qSince: qf.find(x => x.id === me.id)?.t || null, mixAfter: MIX_AFTER,
     queue: TIERS.map((_, t) => qf.filter(x => x.tier === t).length),
     match: mm ? await (async () => {
@@ -532,7 +532,16 @@ const validScore = (x, y) => { const hi = Math.max(x, y), lo = Math.min(x, y); r
 const goodStr = x => typeof x === "string" && TOK.test(x);
 const int = (x, a, b) => Number.isInteger(x) && x >= a && x <= b;
 
+const AVRE = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+=*)$/;
 async function handle(req, context) {
+  if (req.method === "GET") { // profile photo: /api?avatar=<username>&v=<version>; the version makes it safe to cache for a year
+    const n = new URL(req.url).searchParams.get("avatar");
+    if (!n) return E("POST only", 405);
+    const s = getStore({ name: "the-system", consistency: "strong" }), u = await byName(s, n);
+    const d = u && u.av && !u.disabled ? await s.get("av/" + u.id, { type: "text" }) : null, m = d && AVRE.exec(d);
+    if (!m) return new Response("Not found", { status: 404, headers: { "cache-control": "public, max-age=60" } });
+    return new Response(Buffer.from(m[2], "base64"), { headers: { "content-type": m[1], "cache-control": "public, max-age=31536000, immutable", "x-content-type-options": "nosniff" } });
+  }
   if (req.method !== "POST") return E("POST only", 405);
   let b; try { b = await req.json(); } catch { return E("bad json"); }
   const s = getStore({ name: "the-system", consistency: "strong" }), a = b.action;
@@ -602,6 +611,22 @@ async function handle(req, context) {
       if (!rated(u) && !(u.ip > 0) && !u.src) u.pr = r3(2 + v.reduce((a, x) => a + x, 0) / 6 * .5);
     });
     return ok("Skill profile saved");
+  }
+  if (a === "setAvatar") { // client sends a small square JPEG (about 256 px) as a data URL
+    const img = String(b.img || "");
+    if (img.length > 120000 || !AVRE.test(img)) return E("Choose a JPEG, PNG or WebP photo");
+    if (await locked(s, "av:" + me.id, 12, 36e5)) return E("Too many photo changes. Try again later.", 429);
+    await hit(s, "av:" + me.id, 36e5);
+    await s.set("av/" + me.id, img);
+    await mutU(s, me.id, u => { u.av = Date.now(); });
+    await board(s, true).catch(() => {});
+    return ok("Profile picture updated");
+  }
+  if (a === "removeAvatar") {
+    await mutU(s, me.id, u => { if (!u.av) return SKIP; delete u.av; });
+    await s.delete("av/" + me.id).catch(() => {});
+    await board(s, true).catch(() => {});
+    return ok("Profile picture removed");
   }
   if (a === "changePw") {
     const np = String(b.newPw || ""), k = "u:" + me.username.toLowerCase();
