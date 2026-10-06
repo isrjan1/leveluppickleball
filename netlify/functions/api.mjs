@@ -1,6 +1,6 @@
 // Pickleball Level Up API: server-authoritative club rating (2.000-8.000), XP, queue, coach sign-off, RBAC.
 import { getStore } from "@netlify/blobs";
-import { createHash, createHmac, randomBytes, timingSafeEqual, scrypt } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual, scrypt } from "node:crypto";
 const scr = (p, salt) => new Promise((res, rej) => scrypt(p, salt, 32, (e, k) => (e ? rej(e) : res(k))));
 
 const NAME = /^[A-Za-z0-9_.-]{3,20}$/, ID = /^[a-z0-9]{1,16}$/, TOK = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -280,6 +280,98 @@ async function matchmake(s, cfg) {
   if (used.size) await mutate(s, "q", [], q => q.filter(x => fresh(x) && !used.has(x.id)));
 }
 
+// ---- Friends and chat ----
+// One small record per player: f = friends (with unread count un and last-message time lm), i = requests received, o = requests sent.
+// Names are stored beside the ids (usernames never change), so listing friends costs one read.
+const FR0 = { f: [], i: [], o: [] }, FMAX = 200;
+const frOf = async (s, id) => { const x = await jget(s, "fr/" + id, FR0); return { f: x.f || [], i: x.i || [], o: x.o || [] }; };
+const mutF = (s, id, fn) => mutate(s, "fr/" + id, FR0, r => { r.f ||= []; r.i ||= []; r.o ||= []; return fn(r); });
+const ck = (x, y) => "c/" + [x, y].sort().join("_");
+const befriend = (s, x, y) => Promise.all([[x, y], [y, x]].map(([p, q]) => mutF(s, p.id, r => {
+  r.i = r.i.filter(z => z.id !== q.id); r.o = r.o.filter(z => z.id !== q.id);
+  if (!r.f.some(z => z.id === q.id)) r.f.push({ id: q.id, n: q.n, un: 0, lm: 0 });
+})));
+const unfriend = (s, x, y) => Promise.all([[x, y], [y, x]].map(([p, q]) => mutF(s, p, r => {
+  r.f = r.f.filter(z => z.id !== q); r.i = r.i.filter(z => z.id !== q); r.o = r.o.filter(z => z.id !== q);
+})));
+// Conversation view for one friend; opening it clears that friend's unread count. since = newest message the client already has.
+async function thread(s, me, id, since) {
+  const fr = await frOf(s, me.id), f = fr.f.find(x => x.id === id);
+  if (!f) throw new Bad("You can only message friends", 403);
+  if (f.un) await mutF(s, me.id, r => { const x = r.f.find(z => z.id === id); if (!x || !x.un) return SKIP; x.un = 0; });
+  const m = await jget(s, ck(me.id, id), []);
+  if (since && (m.at(-1)?.t || 0) <= since) return J({ same: true, n: f.n });
+  return J({ n: f.n, msgs: m.slice(-100) });
+}
+
+// ---- Hosted open play ----
+// A host publishes an open play (title, place, time, price). Players join and pay the host directly (GCash or another e-wallet,
+// same as coach sessions: the app tracks payment, it doesn't process it). Once the host starts it, the app builds a randomized
+// queue of games from the paid players so everyone gets the same number of games, puts the first games on the free courts, and
+// keeps a ranking from the scores. Stored as one list under "op"; each game is {id, n, p:[a,b,c,d], court, st: q|p|d, sa, sb}.
+const OPLIVE = e => (e.status === "open" || e.status === "live") && e.ts + e.dur * 6e4 + 6 * 36e5 > Date.now();
+const OPRECENT = e => (e.status === "ended" || e.status === "cancelled") && (e.ended || e.ts) > Date.now() - 3 * 864e5;
+const shuffle = a => { for (let i = a.length - 1; i > 0; i--) { const j = randomInt(i + 1); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const inPlay = e => e.pl.filter(x => x.paid && !x.left);
+// Top up the queue until every paid player has e.rounds games. Fewest games first, ties broken at random, teams split at random.
+function opFill(e) {
+  const ps = inPlay(e).map(x => x.id);
+  if (ps.length < 4) return;
+  const cnt = new Map(ps.map(id => [id, 0]));
+  e.g.forEach(g => g.p.forEach(id => cnt.has(id) && cnt.set(id, cnt.get(id) + 1)));
+  for (let n = 0; n < 400; n++) {
+    const order = shuffle(ps.slice()).sort((x, y) => cnt.get(x) - cnt.get(y)); // stable sort: the shuffle decides ties
+    if (cnt.get(order[0]) >= e.rounds) break;
+    const four = shuffle(order.slice(0, 4));
+    four.forEach(id => cnt.set(id, cnt.get(id) + 1));
+    e.g.push({ id: uid(), n: ++e.seq, p: four, court: null, st: "q" });
+  }
+}
+// Put queued games on free courts, never a player who is already on court.
+function opAdvance(e) {
+  const on = e.g.filter(g => g.st === "p"), busy = new Set(on.map(g => g.court)), used = new Set(on.flatMap(g => g.p));
+  for (let c = 1; c <= e.courts; c++) {
+    if (busy.has(c)) continue;
+    const g = e.g.find(x => x.st === "q" && !x.p.some(id => used.has(id)));
+    if (!g) continue;
+    g.st = "p"; g.court = c; g.t0 = Date.now(); g.p.forEach(id => used.add(id));
+  }
+}
+const opSync = e => { if (e.status === "live") { opFill(e); opAdvance(e); } };
+// Remove a player from every game that has not finished (queued or on court); the queue is topped up afterwards.
+const dropOpen = (e, id) => { e.g = e.g.filter(g => g.st === "d" || !g.p.includes(id)); };
+// Ranking inside one open play: wins, then point difference, then points scored.
+function opRank(e) {
+  const m = new Map(e.pl.map(x => [x.id, { id: x.id, n: x.n, g: 0, w: 0, l: 0, pf: 0, pa: 0 }]));
+  for (const g of e.g) if (g.st === "d") for (const [a, b, f, c] of [[0, 1, g.sa, g.sb], [2, 3, g.sb, g.sa]]) for (const k of [a, b]) {
+    const r = m.get(g.p[k]); if (!r) continue;
+    r.g++; r.pf += f; r.pa += c; f > c ? r.w++ : r.l++;
+  }
+  return [...m.values()].filter(r => r.g || e.pl.some(x => x.id === r.id && x.paid && !x.left))
+    .sort((a, b) => b.w - a.w || (b.pf - b.pa) - (a.pf - a.pa) || b.pf - a.pf || a.n.localeCompare(b.n));
+}
+const opLine = (e, me) => ({ id: e.id, title: e.title, loc: e.loc, ts: e.ts, dur: e.dur, price: e.price, cap: e.cap, n: e.pl.filter(x => !x.left).length, st: e.status, hn: e.hn,
+  mine: e.host === me.id, joined: e.pl.some(x => x.id === me.id && !x.left), paid: e.pl.some(x => x.id === me.id && x.paid && !x.left) });
+function opDetail(e, me) {
+  const host = e.host === me.id, joined = e.pl.some(x => x.id === me.id && !x.left), done = e.g.filter(g => g.st === "d");
+  return { id: e.id, title: e.title, desc: e.desc, loc: e.loc, ts: e.ts, dur: e.dur, price: e.price, pay: host || joined ? e.pay : "", cap: e.cap, courts: e.courts, rounds: e.rounds,
+    st: e.status, host: e.host, hn: e.hn, isHost: host, joined, now: Date.now(),
+    pl: e.pl.filter(x => !x.left || e.g.some(g => g.p.includes(x.id))).map(x => ({ id: x.id, n: x.n, paid: !!x.paid, left: !!x.left, me: x.id === me.id, ref: host || x.id === me.id ? x.ref || "" : "" })),
+    g: [...e.g.filter(g => g.st !== "d"), ...done.slice(-30)].map(g => ({ id: g.id, n: g.n, p: g.p, c: g.court, st: g.st, sa: g.sa, sb: g.sb })),
+    total: e.g.length, finished: done.length, rank: opRank(e) };
+}
+// Edit one open play under compare-and-swap; fn edits it in place. Returns the saved copy.
+async function mutOp(s, id, fn) {
+  let out;
+  await mutate(s, "op", [], async list => {
+    const e = list.find(x => x.id === id);
+    if (!e) throw new Bad("Open play not found", 404);
+    await fn(e, list);
+    out = structuredClone(e);
+  });
+  return out;
+}
+
 // Player index for the leaderboard and the Players directory: every active non-admin, rated first by rating.
 async function board(s, force) {
   const c = force ? null : await jget(s, "board", null);
@@ -307,7 +399,7 @@ async function coaches(s, force) {
 }
 async function snapshot(s, me, cfg, full) {
   const names = new Map(), nm = id => { if (!names.has(id)) names.set(id, getU(s, id).then(u => u?.username || "?")); return names.get(id); };
-  const [ms, q, bk, hw, co, bd, ss] = await Promise.all([jget(s, "m", []), jget(s, "q", []), jget(s, "bk", []), jget(s, "hw", []), coaches(s), board(s), jget(s, "ss", [])]);
+  const [ms, q, bk, hw, co, bd, ss, fr, ops] = await Promise.all([jget(s, "m", []), jget(s, "q", []), jget(s, "bk", []), jget(s, "hw", []), coaches(s), board(s), jget(s, "ss", []), frOf(s, me.id), jget(s, "op", [])]);
   const qf = q.filter(fresh), live = bk.filter(b => b.status !== "cancelled"), sm = new Map(ss.map(x => [x.id, x])), cn = new Map(co.map(c => [c.id, c.n])), cp = new Map(co.map(c => [c.id, c.pay]));
   const mm = ms.filter(m => m.p.includes(me.id) && m.status !== "done" && Date.now() - m.start < 3 * 36e5).pop();
   const out = {
@@ -336,6 +428,8 @@ async function snapshot(s, me, cfg, full) {
     bookings: await Promise.all(bk.filter(b => b.player === me.id).slice(-10).map(async b => ({ ...b, cn: await nm(b.coach), pay: cp.get(b.coach) || "", dur: b.dur || sm.get(b.sid)?.dur || 60, title: sm.get(b.sid)?.title || b.kind }))),
     homework: await Promise.all(hw.filter(h => h.student === me.id).slice(-15).map(async h => ({ ...h, cn: await nm(h.coach) }))),
     board: bd.filter(u => u.r != null).slice(0, 25).map(u => ({ ...u, me: u.id === me.id })),
+    friends: { f: fr.f.slice().sort((a, b) => (b.lm | 0) - (a.lm | 0) || a.n.localeCompare(b.n)), i: fr.i, o: fr.o }, unread: fr.f.reduce((t, x) => t + (x.un | 0), 0),
+    ops: ops.filter(e => OPLIVE(e) || (OPRECENT(e) && e.pl.some(x => x.id === me.id))).sort((a, b) => (b.status === "live") - (a.status === "live") || a.ts - b.ts).slice(0, 40).map(e => opLine(e, me)),
   };
   if (me.role !== "player") {
     // roster = durable list on the coach record (survives booking-log trimming) + anything still in the log
@@ -398,7 +492,7 @@ async function handle(req, context) {
   if (!me) return E("unauthorized", 401);
   const coach = me.role === "certified_coach" || me.role === "admin", admin = me.role === "admin";
   const CFGW = ["setCfg", "invite", "redeem"].includes(a);
-  const ok = async (msg) => J({ msg: msg || "", ...(await snapshot(s, a === "state" ? me : await getU(s, me.id), CFGW ? { ...DEF, ...(await jget(s, "cfg", {})) } : cfg, !!b.full)) });
+  const ok = async (msg, x) => J({ msg: msg || "", ...x, ...(await snapshot(s, a === "state" ? me : await getU(s, me.id), CFGW ? { ...DEF, ...(await jget(s, "cfg", {})) } : cfg, !!b.full)) });
 
   if (a === "state") {
     // one-time backfill of the durable roster for coaches whose students predate v7.2
@@ -551,6 +645,176 @@ async function handle(req, context) {
     await mutU(s, me.id, u => { u.role = "certified_coach"; }); await coaches(s, true);
     return ok("You are now a Certified Coach");
   }
+  // ---- Friends and chat
+  if (a === "fAdd") {
+    const t = b.id ? await getU(s, String(b.id)) : await byName(s, String(b.name || "").trim());
+    if (!t || t.disabled || t.role === "admin") return E("Player not found", 404);
+    if (t.id === me.id) return E("That's you");
+    if (await locked(s, "fa:" + me.id, 30, 36e5)) return E("Too many requests. Try again later.", 429);
+    await hit(s, "fa:" + me.id, 36e5);
+    let accept = false;
+    await mutF(s, me.id, r => {
+      if (r.f.some(x => x.id === t.id)) throw new Bad("You're already friends");
+      if (r.o.some(x => x.id === t.id)) throw new Bad("Request already sent");
+      if (r.f.length >= FMAX) throw new Bad("Your friend list is full");
+      if (r.i.some(x => x.id === t.id)) { accept = true; return SKIP; } // they asked first: this is a yes
+      r.o.push({ id: t.id, n: t.username });
+    });
+    if (accept) { await befriend(s, { id: me.id, n: me.username }, { id: t.id, n: t.username }); return ok(`You and ${t.username} are friends`); }
+    await mutF(s, t.id, r => { if (r.f.some(x => x.id === me.id) || r.i.some(x => x.id === me.id)) return SKIP; r.i.push({ id: me.id, n: me.username }); });
+    return ok("Friend request sent");
+  }
+  if (a === "fAccept") {
+    const id = String(b.id || ""), q = (await frOf(s, me.id)).i.find(x => x.id === id);
+    if (!q) return E("Request not found", 404);
+    await befriend(s, { id: me.id, n: me.username }, q);
+    return ok(`You and ${q.n} are friends`);
+  }
+  if (a === "fRemove") { // remove a friend, decline a request, or cancel one you sent
+    const id = String(b.id || "");
+    if (!ID.test(id)) return E("invalid");
+    await unfriend(s, me.id, id); await s.delete(ck(me.id, id));
+    return ok("Removed");
+  }
+  if (a === "chat") return thread(s, me, String(b.id || ""), +b.since || 0);
+  if (a === "send") {
+    const id = String(b.id || ""), text = String(b.text || "").trim().slice(0, 500);
+    if (!text) return E("Type a message first");
+    if (!(await frOf(s, me.id)).f.some(x => x.id === id)) return E("You can only message friends", 403);
+    if (await locked(s, "ch:" + me.id, 30, 6e4)) return E("Slow down a little", 429);
+    await hit(s, "ch:" + me.id, 6e4);
+    const t = Date.now();
+    await mutate(s, ck(me.id, id), [], m => { m.push({ f: me.id, t, x: text }); if (m.length > 200) m.splice(0, m.length - 200); });
+    await Promise.all([mutF(s, id, r => { const x = r.f.find(z => z.id === me.id); if (!x) return SKIP; x.un = (x.un | 0) + 1; x.lm = t; }),
+      mutF(s, me.id, r => { const x = r.f.find(z => z.id === id); if (!x) return SKIP; x.lm = t; })]);
+    return thread(s, me, id);
+  }
+
+  // ---- Hosted open play
+  if (a === "opCreate") {
+    const title = String(b.title || "").trim().slice(0, 60), loc = String(b.loc || "").trim().slice(0, 100), desc = String(b.desc || "").trim().slice(0, 300), pay = String(b.pay || "").trim().slice(0, 120);
+    const ts = +b.ts, dur = Math.min(480, Math.max(30, +b.dur | 0 || 120)), price = Math.round(+b.price * 100) || 0;
+    const cap = Math.min(60, Math.max(4, +b.cap | 0 || 16)), courts = Math.min(10, Math.max(1, +b.courts | 0 || 2)), rounds = Math.min(10, Math.max(1, +b.rounds | 0 || 3));
+    if (title.length < 3 || loc.length < 3) return E("Add a title and a location");
+    if (!(ts > Date.now() - 36e5 && ts < Date.now() + 60 * 864e5)) return E("Pick a start time within the next 60 days");
+    if (!(price >= 0 && price <= 1e6)) return E("Check the price");
+    if (price && pay.length < 3) return E("Add your GCash or e-wallet details so players know where to pay");
+    let made;
+    await mutate(s, "op", [], list => {
+      for (let i = list.length; i--;) if (!OPLIVE(list[i]) && !OPRECENT(list[i])) list.splice(i, 1); // housekeeping
+      if (list.filter(e => e.host === me.id && OPLIVE(e)).length >= 5) throw new Bad("You already have 5 open plays running");
+      if (list.length >= 300) throw new Bad("Too many open plays right now. Try again later.");
+      list.push(made = { id: uid(), host: me.id, hn: me.username, title, desc, loc, ts, dur, price, pay, cap, courts, rounds, status: "open", made: Date.now(), seq: 0,
+        pl: [{ id: me.id, n: me.username, j: Date.now(), paid: true }], g: [] }); // the host plays too and doesn't pay themselves
+    });
+    return ok("Open play published", { od: opDetail(made, me) });
+  }
+  if (a.startsWith("op") && a !== "opCreate") {
+    const id = String(b.id || ""), pid = String(b.pid || "");
+    if (!ID.test(id)) return E("invalid");
+    const hostOnly = e => { if (e.host !== me.id) throw new Bad("Only the host can do that", 403); };
+    let msg = "", e;
+    if (a === "opGet") {
+      e = (await jget(s, "op", [])).find(x => x.id === id);
+      if (!e) return E("Open play not found", 404);
+      return J({ od: opDetail(e, me) });
+    }
+    if (a === "opJoin") {
+      e = await mutOp(s, id, e => {
+        if (e.status !== "open" && e.status !== "live") throw new Bad("This open play is closed");
+        if (e.pl.some(x => x.id === me.id && !x.left)) throw new Bad("You already joined");
+        if (e.pl.filter(x => !x.left).length >= e.cap) throw new Bad("This open play is full");
+        e.pl = e.pl.filter(x => x.id !== me.id); // rejoining after leaving starts fresh
+        e.pl.push({ id: me.id, n: me.username, j: Date.now(), paid: !e.price });
+        opSync(e);
+      });
+      msg = e.price ? "Joined. Pay the host and send your reference number to get into the games." : "Joined";
+    } else if (a === "opLeave") {
+      e = await mutOp(s, id, e => {
+        const x = e.pl.find(z => z.id === me.id && !z.left);
+        if (!x) throw new Bad("You haven't joined");
+        if (e.host === me.id) throw new Bad("The host can't leave. Cancel or end the open play instead.");
+        dropOpen(e, me.id);
+        if (e.g.some(g => g.p.includes(me.id))) x.left = true; else e.pl = e.pl.filter(z => z !== x); // keep the name if they already played
+        opSync(e);
+      });
+      msg = "You left this open play. Ask the host about a refund if you already paid.";
+    } else if (a === "opRef") {
+      const r = String(b.ref || "").trim();
+      if (!/^[A-Za-z0-9 -]{4,24}$/.test(r)) return E("Enter the reference number from your e-wallet receipt");
+      e = await mutOp(s, id, e => { const x = e.pl.find(z => z.id === me.id && !z.left); if (!x) throw new Bad("Join first"); x.ref = r; });
+      msg = "Reference sent to the host";
+    } else if (a === "opPaid") {
+      e = await mutOp(s, id, e => {
+        hostOnly(e);
+        const x = e.pl.find(z => z.id === pid && !z.left);
+        if (!x || x.id === e.host) throw new Bad("Player not found");
+        x.paid = !x.paid; msg = x.paid ? `${x.n} is in` : `${x.n} marked unpaid`;
+        if (!x.paid) dropOpen(e, x.id);
+        opSync(e);
+      });
+    } else if (a === "opKick") {
+      e = await mutOp(s, id, e => {
+        hostOnly(e);
+        const x = e.pl.find(z => z.id === pid && !z.left);
+        if (!x || x.id === e.host) throw new Bad("Player not found");
+        dropOpen(e, x.id);
+        if (e.g.some(g => g.p.includes(x.id))) x.left = true; else e.pl = e.pl.filter(z => z !== x);
+        opSync(e); msg = `${x.n} removed`;
+      });
+    } else if (a === "opStart") {
+      e = await mutOp(s, id, e => {
+        hostOnly(e);
+        if (e.status !== "open") throw new Bad("Already started");
+        if (inPlay(e).length < 4) throw new Bad("You need at least 4 paid players to start");
+        e.status = "live"; e.started = Date.now(); opSync(e);
+      });
+      msg = "Games started. The queue is set.";
+    } else if (a === "opShuffle") {
+      e = await mutOp(s, id, e => {
+        hostOnly(e);
+        if (e.status !== "live") throw new Bad("Start the games first");
+        e.g = e.g.filter(g => g.st !== "q"); opSync(e);
+      });
+      msg = "Queue re-randomized";
+    } else if (a === "opScore") {
+      const x = +b.a, y = +b.b;
+      if (!int(x, 0, 40) || !int(y, 0, 40) || x === y) return E("Enter a final score with a winner");
+      e = await mutOp(s, id, e => {
+        const g = e.g.find(z => z.id === String(b.gid || ""));
+        if (e.status !== "live" || !g) throw new Bad("Game not found");
+        if (e.host !== me.id && !(g.st === "p" && g.p.includes(me.id))) throw new Bad(g.st === "d" ? "Score already entered. Ask the host to change it." : "Only players in this game or the host can enter the score", 403);
+        if (g.st === "q") throw new Bad("This game hasn't started");
+        g.sa = x; g.sb = y; if (g.st === "p") { g.st = "d"; g.t1 = Date.now(); }
+        opSync(e);
+      });
+      msg = "Score saved";
+    } else if (a === "opVoid") { // host: throw a game back into the queue (wrong players, injury, ...)
+      e = await mutOp(s, id, e => {
+        hostOnly(e);
+        const g = e.g.find(z => z.id === String(b.gid || ""));
+        if (!g || g.st !== "p") throw new Bad("Game not found");
+        e.g = e.g.filter(z => z !== g); opSync(e);
+      });
+      msg = "Game removed. The queue was topped up.";
+    } else if (a === "opEnd") {
+      e = await mutOp(s, id, e => {
+        hostOnly(e);
+        if (e.status !== "live") throw new Bad("Nothing to end");
+        e.g = e.g.filter(g => g.st === "d"); e.status = "ended"; e.ended = Date.now();
+      });
+      msg = "Open play ended. Final ranking saved.";
+    } else if (a === "opCancel") {
+      e = await mutOp(s, id, e => {
+        hostOnly(e);
+        if (e.status !== "open") throw new Bad("Already started: end it instead");
+        e.status = "cancelled"; e.ended = Date.now();
+      });
+      msg = "Open play cancelled. Refund anyone who paid.";
+    } else return E("unknown action");
+    return ok(msg, { od: opDetail(e, me) });
+  }
+
   if (["attend", "assess", "assign", "approve", "addSession", "cancelSession", "paid", "setPay", "rate"].includes(a)) {
     if (!coach) return E("forbidden", 403);
     if (a === "setPay") {

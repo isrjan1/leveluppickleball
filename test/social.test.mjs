@@ -1,0 +1,66 @@
+// Friends, chat and hosted open play (v8.1), run through the same API harness as the other tests.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { fresh } from "./helpers/harness.mjs";
+
+const NAMES = ["hosty", "ann", "bob", "cyd", "dee", "eve", "fay"];
+async function setup() {
+  const c = await fresh({ ADMIN_PASSWORD: "x-admin-pw" }), T = {}, ID = {};
+  for (const [i, n] of NAMES.entries()) { T[n] = await c.player(n, "198.51.100." + (i + 10)); ID[n] = (await c.call("state", {}, T[n], "198.51.100.99")).body.me.id; }
+  const call = (a, b, who) => c.call(a, b, T[who], "198.51.100.99");
+  return { c, T, ID, call };
+}
+
+test("friend requests, accept, remove, and chat only between friends", async () => {
+  const { ID, call } = await setup();
+  assert.equal((await call("fAdd", { name: "ann" }, "hosty")).body.friends.o.length, 1);
+  assert.equal((await call("fAdd", { name: "ann" }, "hosty")).status, 400, "no duplicate requests");
+  assert.equal((await call("fAdd", { name: "hosty" }, "hosty")).status, 400, "can't add yourself");
+  assert.equal((await call("fAdd", { name: "nobody" }, "hosty")).status, 404);
+  assert.equal((await call("send", { id: ID.ann, text: "hi" }, "hosty")).status, 403, "not friends yet");
+  assert.equal((await call("state", {}, "ann")).body.friends.i.length, 1);
+  assert.equal((await call("fAccept", { id: ID.hosty }, "ann")).body.friends.f.length, 1);
+  assert.equal((await call("send", { id: ID.ann, text: "see you Saturday" }, "hosty")).body.msgs.length, 1);
+  assert.equal((await call("state", {}, "ann")).body.unread, 1);
+  assert.equal((await call("chat", { id: ID.hosty }, "ann")).body.msgs[0].x, "see you Saturday");
+  assert.equal((await call("state", {}, "ann")).body.unread, 0, "reading clears unread");
+  await call("fRemove", { id: ID.hosty }, "ann");
+  assert.equal((await call("send", { id: ID.ann, text: "x" }, "hosty")).status, 403, "removed friends can't chat");
+  assert.equal((await call("state", {}, "hosty")).body.friends.f.length, 0);
+});
+
+test("two requests crossing become a friendship", async () => {
+  const { ID, call } = await setup();
+  await call("fAdd", { name: "bob" }, "ann");
+  assert.equal((await call("fAdd", { name: "ann" }, "bob")).body.friends.f.length, 1);
+  assert.equal((await call("state", {}, "ann")).body.friends.f[0].id, ID.bob);
+});
+
+test("open play: join, pay, shuffled queue, scores, ranking", async () => {
+  const { ID, call } = await setup();
+  const mk = { title: "Sat open play", loc: "Riverside Courts", ts: Date.now() + 36e5, price: 100, pay: "GCash 0917", cap: 12, courts: 2, rounds: 3 };
+  assert.equal((await call("opCreate", { ...mk, pay: "" }, "hosty")).status, 400, "paid sessions need payment details");
+  const id = (await call("opCreate", mk, "hosty")).body.od.id;
+  assert.equal((await call("opStart", { id }, "hosty")).status, 400, "needs 4 paid players");
+  for (const n of NAMES.slice(1)) assert.equal((await call("opJoin", { id }, n)).status, 200);
+  assert.equal((await call("opJoin", { id }, "ann")).status, 400, "no double join");
+  assert.equal((await call("opPaid", { id, pid: ID.ann }, "ann")).status, 403, "only the host confirms payment");
+  for (const n of ["ann", "bob", "cyd", "dee", "eve"]) await call("opPaid", { id, pid: ID[n] }, "hosty");
+  assert.equal((await call("opStart", { id }, "ann")).status, 403, "only the host starts");
+  let od = (await call("opStart", { id }, "hosty")).body.od;
+  assert.equal(od.st, "live");
+  const games = new Map(); od.g.forEach(g => g.p.forEach(p => games.set(p, (games.get(p) || 0) + 1)));
+  assert.equal(games.size, 6, "only paid players are scheduled");
+  assert.ok(!games.has(ID.fay), "unpaid player is not in any game");
+  assert.ok([...games.values()].every(n => n >= 3), "everyone gets at least 3 games");
+  for (let i = 0; i < 40; i++) {
+    od = (await call("opGet", { id }, "hosty")).body.od;
+    const on = od.g.filter(g => g.st === "p");
+    assert.equal(new Set(on.flatMap(g => g.p)).size, on.length * 4, "nobody on two courts");
+    if (!on.length) break;
+    assert.equal((await call("opScore", { id, gid: on[0].id, a: 11, b: 8 }, "hosty")).status, 200);
+  }
+  assert.ok(od.g.every(g => g.st === "d") && od.finished > 0);
+  assert.equal(od.rank.reduce((t, r) => t + r.g, 0), od.finished * 4);
+  assert.equal((await call("opEnd", { id }, "hosty")).body.od.st, "ended");
+});
