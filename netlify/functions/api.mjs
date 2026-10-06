@@ -278,6 +278,7 @@ async function handle(req, context) {
     const n = String(b.username || "").toLowerCase(), pw = String(b.password || "");
     if ((await Promise.all([locked(s, "u:" + n, 8, 9e5), locked(s, "i:" + ip, 40, 9e5)])).some(Boolean)) return E("Too many attempts. Try again in 15 minutes.", 429);
     const u = await byName(s, n);
+    if (!u && n === "admin" && !process.env.ADMIN_PASSWORD) return E("Admin not set up: add ADMIN_PASSWORD in Netlify environment variables, then redeploy", 503);
     if (pw.length < 1 || pw.length > 128 || !(await verify(s, u, pw))) { await Promise.all([hit(s, "u:" + n, 9e5), hit(s, "i:" + ip, 9e5)]); return E("bad credentials", 401); }
     if (u.disabled) return E("This account is disabled", 403);
     return J({ token: await token(s, u) });

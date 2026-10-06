@@ -43,6 +43,8 @@ input.s{width:64px}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(72px + env(safe-area-inset-bottom,0px));background:var(--text);color:var(--bg);padding:8px 14px;max-width:90%;z-index:9}
 .vs{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;text-align:center;align-items:center;margin:8px 0}
 .err{color:var(--danger)}
+body.busy .app [data-a]:not([data-a=tab]){opacity:.6;pointer-events:none}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .days{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:6px}
 .days button{flex:none;min-width:48px;background:var(--panel2);border:1px solid var(--line);padding:4px 6px;display:flex;flex-direction:column;align-items:center}
 .days button.on{background:var(--accent);color:var(--on)}.days i{font-style:normal;font-size:11px;min-height:14px}.days b{font:700 18px var(--disp)}
@@ -55,7 +57,8 @@ const $=s=>document.querySelector(s);
 let T=localStorage.getItem("pt"),S=null,tab="play",toast="",authMode="login",qrText="",qrCode="",showQr=false,calDay=null;
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 async function api(action,d={}){
-  const r=await fetch("/api",{method:"POST",headers:{"content-type":"application/json",authorization:"Bearer "+(T||"")},body:JSON.stringify({action,full:tab==="admin",...d})});
+  let r;try{r=await fetch("/api",{method:"POST",headers:{"content-type":"application/json",authorization:"Bearer "+(T||"")},body:JSON.stringify({action,full:tab==="admin",...d})})}
+  catch(e){throw new Error(navigator.onLine?"Can't reach the server. Try again in a moment.":"You're offline. Check your connection and try again.")}
   const j=await r.json().catch(()=>({}));
   if(!r.ok){if(r.status===401&&T){T=null;localStorage.removeItem("pt")}throw new Error(j.error||"Error")}
   return j;
@@ -73,21 +76,30 @@ function ics(id){const b=S.bookings.find(x=>x.id===id);if(!b)return;
   const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([t],{type:"text/calendar"}));a.download="session.ics";document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),4e3)}
 const ago=t=>Math.max(0,Math.round((Date.now()-t)/6e4));
 
+let busy=false;
+const setBusy=b=>{busy=b;document.body.classList.toggle("busy",b)};
 async function run(action,d){
+  if(busy)return;setBusy(true);
   try{const j=await api(action,d);if(j.token){T=j.token;localStorage.setItem("pt",T)}if(j.me){seq++;S=j;say(j.msg||"")}else{await load();return}}
   catch(e){say(e.message,1)}
-  draw();
+  finally{setBusy(false)}
+  draw();ciPending();
 }
 let toastT,seq=0;
 function say(m,bad){toast=m?(bad?"! ":"")+m:"";clearTimeout(toastT);if(m)toastT=setTimeout(()=>{toast="";const t=document.querySelector(".toast");if(t)t.remove()},m.startsWith("Invite")?60000:3500)}
 let lastJ="";
-async function load(poll){const n=++seq;let same=false;try{const j=await api("state");if(n===seq){const k=JSON.stringify({...j,msg:0});same=poll&&k===lastJ;lastJ=k;S=j}}catch(e){}if(!same)draw(poll);const c=sessionStorage.getItem("ci");if(c&&S){sessionStorage.removeItem("ci");run("checkin",{code:c})}}
+async function load(poll){const n=++seq;let same=false;try{const j=await api("state");if(n===seq){const k=JSON.stringify({...j,msg:0});same=poll&&k===lastJ;lastJ=k;S=j}}catch(e){}if(!same)draw(poll);ciPending()}
+// a facility QR scanned before logging in is kept until the app is free to check the player in
+function ciPending(){const c=sessionStorage.getItem("ci");if(c&&T&&S&&!busy){sessionStorage.removeItem("ci");run("checkin",{code:c})}}
 async function refreshQr(poll){try{const j=await api("qrCode");qrCode=j.code;qrText=location.origin+"/?ci="+j.code}catch(e){say(e.message,1)}draw(poll)}
 
 async function auth(){
   const u=v("u").trim(),p=v("p");
+  if(busy)return;setBusy(true);
   try{const j=await api(authMode==="reg"?"register":"login",{username:u,password:p});T=j.token;localStorage.setItem("pt",T);await load()}
-  catch(e){say(e.message==="taken"?"Name taken":e.message==="invalid"?"Name 3-20 letters/numbers, password 6+":/Too many|disabled/.test(e.message)?e.message:"Wrong name or password",1);draw()}
+  catch(e){say(e.message==="taken"?"Name taken":e.message==="invalid"?"Name 3-20 letters/numbers, password 6+":/Too many|disabled|offline|reach|Admin not set up/.test(e.message)?e.message:"Wrong name or password",1);draw()}
+  finally{setBusy(false)}
+  ciPending();
 }
 function geo(){
   say("Checking location...");draw();
@@ -112,21 +124,21 @@ function survey(){return `<div class="win"><h2>Skill survey</h2><p class="sub">R
 const A={
   sv:()=>run("survey",{v:[0,1,2,3,4,5].map(i=>+v("sk"+i))}).then(()=>{if(!toast.startsWith("!"))rtk=false;draw()}),svx:()=>{rtk=false;draw()},rt:()=>{rtk=true;draw()},
   checkin:()=>S.qr?run("checkin",{code:v("fc")}):geo(),qrOn:async()=>{showQr=true;await refreshQr()},qrOff:()=>{showQr=false;draw()},join:()=>run("join"),leave:()=>run("leave"),
-  claim:x=>run("claim",{qid:x}),book:x=>run("book",{sessionId:x}),cancel:x=>run("cancel",{id:x}),day:x=>{calDay=x||null;draw()},ics,ref:x=>run("ref",{id:x,ref:v("rf"+x)}),setPay:()=>run("setPay",{text:v("cp")}),
+  claim:x=>run("claim",{qid:x}),book:x=>run("book",{sessionId:x}),cancel:x=>ask("Cancel this booking?")&&run("cancel",{id:x}),day:x=>{calDay=x||null;draw()},ics,ref:x=>run("ref",{id:x,ref:v("rf"+x)}),setPay:()=>run("setPay",{text:v("cp")}),
   addSession:()=>{const w=v("sw");run("addSession",{kind:v("sk"),ts:w?new Date(w).getTime():0,title:v("st"),price:+v("sp"),cap:+v("sc"),dur:+v("sd")})},
-  cancelSession:x=>run("cancelSession",{sid:x}),paid:x=>run("paid",{id:x}),
+  cancelSession:x=>{const n=(S.coach.sessions.find(s=>s.id===x)||{}).booked|0;ask(n?`Cancel this session? ${n} booked player${n===1?"":"s"} will lose their spot.`:"Cancel this session?")&&run("cancelSession",{sid:x})},paid:x=>run("paid",{id:x}),
   score:x=>run("score",{matchId:x,a:+v("sa"),b:+v("sb")}),
-  attend:()=>run("attend",{id:v("bid")}),
+  attend:x=>run("attend",{id:x||v("bid")}),
   assess:x=>run("assess",{playerId:v("stu"),badge:v("bdg"),pass:x==="1"}),
   assign:()=>run("assign",{playerId:v("hs"),title:v("ht"),xp:+v("hx")}),
   approve:x=>run("approve",{id:x}),
-  setRole:x=>run("setRole",{id:x,role:v("r"+x)}),resetElo:x=>run("resetElo",{id:x}),
+  setRole:x=>{const r=v("r"+x);(r!=="admin"||ask("Give this user full admin access?"))&&run("setRole",{id:x,role:r})},resetElo:x=>ask("Reset this player's Elo to 1000?")&&run("resetElo",{id:x}),
   resolve:x=>run("resolve",{matchId:x,a:+v("ra"+x),b:+v("rb"+x)}),
   setCfg:()=>run("setCfg",{qr:document.getElementById("cq").checked,tz:v("ct"),courts:v("cc"),lat:v("cl"),lng:v("cn"),rad:v("cr"),minMin:v("cm")}),
   pw:async()=>{const n=v("np");if(n.length<6){say("Use 6+ characters",1);return draw()}
     await run("changePw",{oldPw:v("op"),newPw:n});["op","np"].forEach(i=>{const e=document.getElementById(i);if(e)e.value=""})},
-  setDisabled:x=>{const u=(S.admin.users||[]).find(u=>u.id===x);if(u)run("setDisabled",{id:x,disabled:!u.disabled})},
-  voidMatch:x=>run("voidMatch",{matchId:x}),invite:()=>run("invite"),redeem:()=>run("redeem",{token:v("tk")}),
+  setDisabled:x=>{const u=(S.admin.users||[]).find(u=>u.id===x);if(u&&(u.disabled||ask(`Disable ${u.username}? They will be logged out and removed from the queue.`)))run("setDisabled",{id:x,disabled:!u.disabled})},
+  voidMatch:x=>ask("Void this match? No XP or Elo will be awarded.")&&run("voidMatch",{matchId:x}),invite:()=>run("invite"),redeem:()=>run("redeem",{token:v("tk")}),
   logout:()=>{T=null;S=null;showQr=false;calDay=null;tab="play";localStorage.removeItem("pt");draw()},auth,
   mode:()=>{authMode=authMode==="login"?"reg":"login";draw()},
   tab:x=>{tab=x;draw();if(x==="admin")load()}
@@ -134,6 +146,7 @@ const A={
 document.addEventListener("click",e=>{const b=e.target.closest("[data-a]");if(b&&A[b.dataset.a])A[b.dataset.a](b.dataset.v)});
 
 const opts=(l,f)=>l.map(f).join("");
+const ask=m=>!busy&&confirm(m);
 function login(){return `<div class="win"><h2>Pickleball Level Up</h2><p class="sub">Play ranked open play, finish quests, earn skill badges from certified coaches.</p>
 <input id="u" placeholder="Username" autocapitalize="none" autocomplete="username"><input id="p" type="password" placeholder="Password" autocomplete="current-password">
 <div><button class="btn" data-a="auth">${authMode==="reg"?"Create player account":"Log in"}</button>
@@ -144,7 +157,7 @@ function play(){
   let h=nb?`<div class="win"><h2>Coming up</h2><p>${esc(nb.title)} with ${esc(nb.cn)}, ${when(nb.ts)}<br><span class="m">Check-in code: <b>${nb.id}</b></span></p></div>`:"";
   if(m){
     const mins=ago(m.start),can=mins>=m.minMin;
-    h+=`<div class="win"><h2>${esc(m.court)}${m.status==="disputed"?" (disputed)":""}</h2>
+    h+=`<div class="win"><h2>${esc(m.court)}${m.status==="disputed"?" (disputed)":""}</h2>${m.mixed?`<p class="m">Mixed-tier match: teams are balanced by Elo.</p>`:""}
     <div class="vs"><div><b>${m.A.map(esc).join("<br>")}</b></div><span class="m">vs</span><div><b>${m.B.map(esc).join("<br>")}</b></div></div>
     <p class="m">Playing ${mins} min. ${can?"":`Scores unlock after ${m.minMin} min.`}</p>
     ${m.status==="disputed"?`<p class="err">Scores did not match. An admin will decide.</p>`:m.sent?`<p class="m">Your score is in. Waiting for the other team.</p>`:
@@ -154,7 +167,8 @@ function play(){
     <p class="m">${S.checked?"Checked in at the facility.":"Check in at the facility to join the queue."}</p>
     ${S.checked?"":S.qr?`<input id="fc" placeholder="Facility code" autocapitalize="characters"><button class="btn" data-a="checkin">Check in</button><p class="m">Or scan the QR code at the facility with your phone camera.</p>`:`<button class="btn" data-a="checkin">Check in (location)</button>`}
     ${S.checked?(S.inQueue?`<button class="btn w" data-a="leave">Leave queue</button>`:`<button class="btn" data-a="join">Join queue</button>`):""}
-    <p class="m">Waiting: ${S.tiers.map((n,i)=>n+" "+q[i]).join(", ")}. A match starts when 4 players in a tier are ready.</p></div>`;
+    ${S.inQueue&&S.qSince?`<p>In the queue for ${ago(S.qSince)} min.</p>`:""}
+    <p class="m">Waiting: ${S.tiers.map((n,i)=>n+" "+q[i]).join(", ")}. A match starts when 4 players in a tier are ready. If your tier is short for ${Math.round((S.mixAfter||6e5)/6e4)} min, you may be matched with the next tier up or down.</p></div>`;
   }
   if(S.me.last)h+=`<div class="win"><h2>Last match</h2><p>${esc(S.me.last)}</p></div>`;
   return h;
@@ -194,8 +208,8 @@ function coach(){
   ${(()=>{let last="";return c.sessions.map(x=>{const d=dk(x.ts),h=d!==last?(last=d,`<p class="m" style="margin:12px 0 0"><b>${new Date(x.ts).toLocaleDateString([],{weekday:"long",month:"short",day:"numeric"})}</b></p>`):"",w=c.who[x.id]||[];return h+`<div class="row"><div class="g1">${tm(x.ts)} to ${tm(x.ts+x.dur*6e4)}: ${esc(x.title)}<div class="m">${x.kind}, ${money(x.price)}, ${x.booked}/${x.cap} booked${w.length?" ("+w.map(esc).join(", ")+")":""}</div></div><button class="btn w" data-a="cancelSession" data-v="${x.id}">Cancel</button></div>`}).join("")})()}</div>
   <div class="win"><h2>Payments</h2><p class="m">Paid ${money(c.revenue)}. Outstanding ${money(c.due)}. Players pay you directly by GCash or another e-wallet. Confirm here once received.</p>
   <input id="cp" style="width:100%" placeholder="Your GCash / e-wallet number and name" value="${esc(S.me.pay||"")}"><button class="btn g" data-a="setPay">Save payment details</button>${opts(c.bookings.filter(b=>b.status!=="cancelled"&&b.price).slice(0,10),b=>`<div class="row"><div class="g1">${esc(b.pn)}<div class="m">${esc(b.title||b.kind)}, ${money(b.price)}${b.ref?", ref "+esc(b.ref):""}</div></div><button class="btn ${b.paid?"":"g"}" data-a="paid" data-v="${b.id}">${b.paid?"Paid":"Mark paid"}</button></div>`)}</div>
-  <div class="win"><h2>Check in a student</h2><p class="sub">Enter the booking code shown on the player's Me tab.</p><input id="bid" placeholder="Booking code"><button class="btn" data-a="attend">Check in (+40 XP)</button>
-  ${opts(c.bookings.filter(b=>b.status==="booked").slice(0,8),b=>`<div class="row m">${esc(b.pn)}: ${b.id} (${when(b.ts)})</div>`)}</div>
+  <div class="win"><h2>Check in a student</h2><p class="sub">Tap Check in next to the student, or type the code from their Book tab.</p><input id="bid" placeholder="Booking code"><button class="btn" data-a="attend">Check in (+40 XP)</button>
+  ${opts(c.bookings.filter(b=>b.status==="booked").slice(0,8),b=>`<div class="row"><div class="g1">${esc(b.pn)}<div class="m">${esc(b.title||b.kind)}, ${when(b.ts)}, code ${b.id}</div></div><button class="btn g" data-a="attend" data-v="${b.id}">Check in</button></div>`)}</div>
   <div class="win"><h2>Skill assessment</h2>${c.students.length?`<select id="stu">${opts(c.students,s=>`<option value="${s.id}">${esc(s.n)} (${S.tiers[s.t]})</option>`)}</select>
   <select id="bdg">${opts(Object.entries(S.badgeDefs),([k,d])=>`<option value="${k}">${esc(d.n)}</option>`)}</select>
   <div><button class="btn" data-a="assess" data-v="1">Pass</button><button class="btn w" data-a="assess" data-v="0">Not yet</button></div>`:`<p class="m">Students appear after you check in a booking.</p>`}</div>
@@ -221,17 +235,17 @@ function draw(poll){
   if(poll&&f&&/INPUT|SELECT/.test(f.tagName)&&el.contains(f))return;
   const vals={},chk={};el.querySelectorAll("input[id],select[id]").forEach(e=>{if(e.type==="checkbox")chk[e.id]=e.checked;else vals[e.id]=e.value});
   const dsl=(el.querySelector(".days")||{}).scrollLeft||0,fid=f&&f.id&&el.contains(f)?f.id:null;let sel=null;try{if(fid&&f.selectionStart!=null)sel=[f.selectionStart,f.selectionEnd]}catch(_){}
-  const rest=()=>{for(const k in vals){const e=document.getElementById(k);if(e)e.value=vals[k]}for(const k in chk){const e=document.getElementById(k);if(e)e.checked=chk[k]}
+  const rest=()=>{el.querySelectorAll("input[placeholder]:not([aria-label])").forEach(e=>e.setAttribute("aria-label",e.placeholder));for(const k in vals){const e=document.getElementById(k);if(e)e.value=vals[k]}for(const k in chk){const e=document.getElementById(k);if(e)e.checked=chk[k]}
     const d=el.querySelector(".days");if(d)d.scrollLeft=dsl;
     if(fid){const e=document.getElementById(fid);if(e){e.focus({preventScroll:true});try{if(sel)e.setSelectionRange(sel[0],sel[1])}catch(_){}}}};
-  const tt=toast?`<div class="toast">${esc(toast)}</div>`:"";
+  const tt=toast?`<div class="toast" role="status" aria-live="polite">${esc(toast)}</div>`:"";
   if(!T||!S){el.innerHTML=login()+tt;rest();return}
   const r=S.me.role,tabs=[["play","Play"],["quests","Quests"],["cal","Book"],["me","Me"],["board","Ranks"]];
   if(r!=="player")tabs.push(["coach","Coach"]);if(r==="admin")tabs.push(["admin","Admin"]);
   if(!tabs.some(t=>t[0]===tab))tab="play";
   const need=r==="player"&&(!S.me.sk||rtk);const body=need?survey():{play,quests,cal,me,board,coach,admin}[tab]();
   el.innerHTML=`<div class="top"><b>${esc(S.me.username)}</b><span class="tag">${r.replace("_"," ")}</span></div>${S.me.defaultPw?`<div class="win err">Change the default admin password on the Me tab.</div>`:""}${body}
-  <nav class="tabs"${need?" hidden":""}>${tabs.map(([k,n])=>`<button class="${k===tab?"on":""}" data-a="tab" data-v="${k}">${n}</button>`).join("")}</nav>${tt}`;
+  <nav class="tabs" aria-label="Sections"${need?" hidden":""}>${tabs.map(([k,n])=>`<button class="${k===tab?"on":""}"${k===tab?' aria-current="page"':""} data-a="tab" data-v="${k}">${n}</button>`).join("")}</nav>${tt}`;
   rest();
   if(showQr&&tab==="admin"&&window.QRCode){const q=document.getElementById("qrbox");if(q&&!q.firstChild)new QRCode(q,{text:qrText,width:200,height:200})}
 }
