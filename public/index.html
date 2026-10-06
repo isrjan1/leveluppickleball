@@ -111,6 +111,12 @@ label.chk input{min-height:0;margin:0}
 .score{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .score input{width:72px;font:700 26px var(--disp);text-align:center;padding:6px}
 .exp{font-size:15px}
+.court>div{display:grid;gap:4px}
+.pick{display:grid;gap:4px;justify-items:center}
+.pick>div{display:flex;align-items:center;gap:6px}
+.step{width:44px;height:44px;border-radius:50%;border:1px solid var(--line);background:var(--card);font:700 24px/1 var(--disp);color:var(--blue)}
+.score{justify-content:space-around;margin:8px 0}
+.who4 .row{padding:8px 0}.who4 .av{width:32px;height:32px;font-size:13px}
 
 /* search */
 .search{position:relative}
@@ -158,7 +164,7 @@ label.chk input{min-height:0;margin:0}
 .welcome h1 i{font-style:normal;color:var(--ball)}
 .welcome .hero p{position:relative;color:#C9D6EA;max-width:30ch;margin:12px 0 0}
 
-body.busy .app [data-a]:not([data-a=tab]):not([data-a=logout]):not([data-a=qrOff]):not([data-a=day]):not([data-a=mode]):not([data-a=ics]):not([data-a=rt]):not([data-a=svx]):not([data-a=prof]):not([data-a=back]){opacity:.6;pointer-events:none}
+body.busy .app [data-a]:not([data-a=tab]):not([data-a=logout]):not([data-a=qrOff]):not([data-a=day]):not([data-a=mode]):not([data-a=ics]):not([data-a=rt]):not([data-a=svx]):not([data-a=prof]):not([data-a=back]):not([data-a=step]){opacity:.6;pointer-events:none}
 :focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .hero :focus-visible,.bar :focus-visible{outline-color:var(--ball)}
 @media(prefers-reduced-motion:no-preference){.delta{animation:pop .5s ease-out}@keyframes pop{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}}
@@ -213,7 +219,7 @@ let busy=false;
 const setBusy=b=>{busy=b;document.body.classList.toggle("busy",b)};
 async function run(action,d){
   if(busy)return false;setBusy(true);
-  try{const j=await api(action,d);if(j.token){T=j.token;localStorage.setItem("pt",T)}if(j.me){seq++;S=j;P={};say(j.msg||"")}else{await load();return}}
+  try{const j=await api(action,d);if(j.token){T=j.token;localStorage.setItem("pt",T)}if(j.me){seq++;S=j;S._recv=Date.now();P={};say(j.msg||"")}else{await load();return}}
   catch(e){say(e.message,1)}
   finally{setBusy(false)}
   draw();ciPending();return true;
@@ -221,7 +227,8 @@ async function run(action,d){
 let toastT,seq=0;
 function say(m,bad){toast=m||"";toastBad=!!bad;clearTimeout(toastT);if(m)toastT=setTimeout(()=>{toast="";const t=document.querySelector(".toast");if(t)t.remove()},/^(Invite|Temporary password)/.test(m)?60000:4000)}
 let lastJ="";
-async function load(poll){const n=++seq;let same=false;try{const j=await api("state");if(n===seq){const k=JSON.stringify({...j,msg:0});same=poll&&k===lastJ;if(!same)P={};lastJ=k;S=j}}catch(e){}if(!same)draw(poll);ciPending()}
+async function load(poll){const n=++seq;let same=false;try{const j=await api("state");if(n===seq){const k=JSON.stringify({...j,msg:0,match:j.match&&{...j.match,now:0}});same=poll&&k===lastJ;if(!same)P={};if(j.match)same=false;// a live game always redraws so its clock moves
+lastJ=k;S=j;S._recv=Date.now()}}catch(e){}if(!same)draw(poll);ciPending()}
 // a facility QR scanned before logging in is kept until the app is free to check the player in
 function ciPending(){const c=sessionStorage.getItem("ci");if(c&&T&&S&&!busy){sessionStorage.removeItem("ci");run("checkin",{code:c})}}
 async function refreshQr(poll){try{const j=await api("qrCode");qrCode=j.code;qrText=location.origin+"/?ci="+j.code}catch(e){say(e.message,1)}draw(poll)}
@@ -263,7 +270,9 @@ const A={
   claim:x=>run("claim",{qid:x}),book:x=>run("book",{sessionId:x}),cancel:x=>ask("Cancel this booking?")&&run("cancel",{id:x}),day:x=>{calDay=x||null;draw()},ics,ref:x=>run("ref",{id:x,ref:v("rf"+x)}),setPay:()=>run("setPay",{text:v("cp")}),
   addSession:()=>{const w=v("sw");run("addSession",{kind:v("sk"),ts:w?new Date(w).getTime():0,title:v("st"),price:+v("sp"),cap:+v("sc"),dur:+v("sd")})},
   cancelSession:x=>{const n=(S.coach.sessions.find(s=>s.id===x)||{}).booked|0;ask(n?`Cancel this session? ${n} booked player${n===1?"":"s"} will lose their spot.`:"Cancel this session?")&&run("cancelSession",{sid:x})},paid:x=>run("paid",{id:x}),
-  score:x=>{const my=+v("sa"),op=+v("sb"),side=S.match?S.match.side:0;run("score",side?{matchId:x,a:op,b:my}:{matchId:x,a:my,b:op})},
+  score:x=>{const my=+v("sa"),op=+v("sb"),side=S.match?S.match.side:0;if(v("sa")===""||v("sb")===""||!okScore(my,op)){say("Enter a valid final score first: games to 11, 15 or 21, won by 2.",1);return draw()}
+    if(!ask(`Enter this score? Your team ${my>op?"won":"lost"} ${my}-${op}. The other three players will be asked to confirm it.`))return;run("score",side?{matchId:x,a:op,b:my}:{matchId:x,a:my,b:op})},
+  step:x=>{const[id,d]=x.split(":"),e=document.getElementById(id);if(!e)return;e.value=Math.max(0,Math.min(40,(+e.value||0)+ +d));preview()},
   agree:x=>{const m=S.match;if(m&&m.agreed)run("score",{matchId:x,a:m.agreed[0],b:m.agreed[1]})},
   reject:x=>ask("Reject this score? The admin will decide the result.")&&run("reject",{matchId:x}),
   attend:x=>run("attend",{id:x||v("bid")}),
@@ -287,7 +296,11 @@ const A={
   tab:x=>{tab=x;view=null;draw();scrollTo(0,0);if(x==="admin")load();if(x==="players")searchPlayers(v("ps")||"")}
 };
 document.addEventListener("click",e=>{const b=e.target.closest("[data-a]");if(b&&A[b.dataset.a])A[b.dataset.a](b.dataset.v)});
-let sT;document.addEventListener("input",e=>{if(e.target.id==="ps"){clearTimeout(sT);sT=setTimeout(()=>searchPlayers(e.target.value.trim()),250)}});
+const okScore=(x,y)=>{const hi=Math.max(x,y),lo=Math.min(x,y);return x>=0&&y>=0&&hi-lo>=2&&([11,15,21].includes(hi)||(hi>11&&hi-lo===2))};
+function preview(){const p=document.getElementById("spv");if(!p)return;const a=v("sa"),b=v("sb");
+  if(a===""||b===""){p.textContent="Games go to 11, 15 or 21 and must be won by 2.";p.className="m";return}
+  const x=+a,y=+b;p.className=okScore(x,y)?"":"err";p.innerHTML=okScore(x,y)?`You're entering: your team <b>${x>y?"won":"lost"} ${x}-${y}</b>.`:"That isn't a valid final score yet. Games go to 11, 15 or 21 and must be won by 2.";}
+let sT;document.addEventListener("input",e=>{if(e.target.id==="sa"||e.target.id==="sb")preview();if(e.target.id==="ps"){clearTimeout(sT);sT=setTimeout(()=>searchPlayers(e.target.value.trim()),250)}});
 
 const opts=(l,f)=>l.map(f).join("");
 const ask=m=>!busy&&confirm(m);
@@ -322,17 +335,7 @@ function teamBlock(names,rs,mine){return`<div class="team${mine?" mine":""}">${n
 function play(){
   const m=S.match,q=S.queue,t=S.me.tier,nb=S.bookings.filter(b=>b.status==="booked"&&b.ts>Date.now()-36e5&&b.ts-Date.now()<864e5).sort((a,b)=>a.ts-b.ts)[0];
   let h=hero({...S.me,n:S.me.username,t:S.me.tier,coach:S.me.role==="certified_coach"},{self:1});
-  if(m){
-    const mins=ago(m.start),can=mins>=m.minMin,left=m.cf?Math.max(0,Math.ceil((m.cf+m.confirm-Date.now())/6e4)):null;
-    const mine=s2=>s2&&(m.side?[s2[1],s2[0]]:s2),ag=mine(m.agreed),my=mine(m.mine),res=x=>`${x[0]>x[1]?"won":"lost"} ${x[0]}-${x[1]}`;
-    h+=`<div class="sheet"><h2>${esc(m.court)}${m.status==="disputed"?", score disputed":""}</h2><p class="sub">Playing ${mins} min${m.mixed?". Mixed-tier match, teams balanced by rating":""}.</p>
-    <div class="court">${m.side?teamBlock(m.B,m.Br,1):teamBlock(m.A,m.Ar,1)}<span class="vs">vs</span>${m.side?teamBlock(m.A,m.Ar):teamBlock(m.B,m.Br)}</div>
-    <p class="m" style="display:flex;justify-content:space-between;margin-top:-4px"><span>Your team</span><span>Opponents</span></p>
-    <p class="exp">Your team is expected to ${m.exp>=.5?"win":"lose"} <b>${expScore(m.exp).split("-").sort((a,b)=>m.exp>=.5?b-a:a-b).join("-")}</b>. Do better than that and your rating goes up, even if you lose.</p>
-    ${m.status==="disputed"?`<div class="note warn">The scores didn't match or someone rejected them. The admin will set the result.</div>`
-    :m.sent?`<div class="note">You confirmed your team <b>${res(my)}</b>. ${m.nsub} of 4 players have confirmed.${left!=null?` It counts in ${left} min unless someone rejects it.`:" Waiting for the other team."}</div><button class="btn w" data-a="reject" data-v="${m.id}">Reject score</button>`
-    :m.agreed?`<div class="note">Another player entered the score: your team <b>${res(ag)}</b>. ${m.nsub} of 4 confirmed. If it's right, confirm it. If not, reject it and the admin will decide.</div><button class="btn" data-a="agree" data-v="${m.id}">Confirm: we ${res(ag)}</button><button class="btn w" data-a="reject" data-v="${m.id}">Reject</button>`
-    :`<p class="m">${can?"When the game ends, enter the final score. Games to 11, 15 or 21, win by 2.":`You can enter the score after ${m.minMin} min of play.`}</p><div class="score"><label class="m">Your team<br><input id="sa" type="number" inputmode="numeric" min="0" max="40" placeholder="0"></label><span class="vs">-</span><label class="m">Opponents<br><input id="sb" type="number" inputmode="numeric" min="0" max="40" placeholder="0"></label><button class="btn" ${can?"":"disabled"} data-a="score" data-v="${m.id}">Submit score</button></div>`}</div>`;
+  if(m){h+=matchCard(m);
   }else{
     h+=`<div class="sheet"><h2>Open play</h2><p class="sub">${S.checked?"You're checked in. Join the queue and you'll get a court when four players are ready.":"Check in when you're at the club, then join the queue."}</p>
     ${S.checked?"":S.qr?`<input class="w100" id="fc" placeholder="Facility code" autocapitalize="characters"><button class="btn big" data-a="checkin">Check in</button><p class="m">Or scan the QR code at the front desk with your phone camera.</p>`:`<button class="btn big" data-a="checkin">Check in with my location</button>`}
@@ -358,6 +361,34 @@ function guide(){
   return `<div class="sheet"><h2>Getting started</h2><ol class="steps">${st.map(([d,t,e],i)=>`<li class="${d?"done":i===now?"now":""}"><b>${t}</b>${i===now?`<span class="m">${e}</span>`:""}</li>`).join("")}</ol><button class="linkbtn" data-a="hideGuide">Hide this guide</button></div>`;
 }
 const safeGet=k=>{try{return localStorage.getItem(k)}catch(_){return null}};
+// Live match: teams, prediction, then a step-by-step score flow that tells each of the four players what to do.
+function matchCard(m){
+  const skew=(S._recv||Date.now())-(m.now||S._recv||Date.now()),srv=()=>Date.now()-skew; // server time = phone time minus the offset seen when the data arrived
+  const mins=Math.max(0,Math.round((srv()-m.start)/6e4)),openIn=Math.max(0,Math.ceil((m.unlock-srv())/6e4)),can=openIn===0;
+  const left=m.cf?Math.max(0,Math.ceil((m.cf+m.confirm-srv())/6e4)):null;
+  const flip=x=>x&&(m.side?[x[1],x[0]]:x),res=x=>`${x[0]>x[1]?"won":"lost"} ${x[0]}-${x[1]}`;
+  const ag=flip(m.agreed),meP=(m.ppl||[]).find(p=>p.me)||{},pred=expScore(m.exp).split("-").sort((a,b)=>m.exp>=.5?b-a:a-b).join("-");
+  const mineT=m.side?{n:m.B,r:m.Br}:{n:m.A,r:m.Ar},oppT=m.side?{n:m.A,r:m.Ar}:{n:m.B,r:m.Br};
+  const ST={entered:["Entered the score","up"],confirmed:["Confirmed","up"],waiting:["Waiting","m"]};
+  const people=`<div class="who4">${(m.ppl||[]).map(p=>`<div class="row">${av(p.n)}<div class="g1"><span class="n">${esc(p.n)}${p.me?" (you)":""}</span><div class="m">${p.team===m.side?"Your team":"Opponents"}</div></div><b class="${ST[p.st][1]}">${p.st==="waiting"?"":"&#10003; "}${ST[p.st][0]}</b></div>`).join("")}</div>`;
+  let body;
+  if(m.status==="disputed")body=`<div class="note warn"><b>Score disputed.</b> The scores didn't match, or a player rejected them. The admin will set the result. Nothing more to do here.</div>`;
+  else if(!can)body=`<div class="note"><b>Play your game first.</b> Score entry opens in ${openIn} min.</div>`;
+  else if(!m.agreed)body=`<h3>Step 1: one player enters the final score</h3><p class="m">Only one of you needs to do this. The other three will confirm it.</p>
+    <div class="score"><div class="pick"><span class="m">Your team</span><div><button class="step" data-a="step" data-v="sa:-1" aria-label="Your team minus one">&minus;</button><input id="sa" type="number" inputmode="numeric" min="0" max="40" placeholder="-"><button class="step" data-a="step" data-v="sa:1" aria-label="Your team plus one">+</button></div></div>
+    <div class="pick"><span class="m">Opponents</span><div><button class="step" data-a="step" data-v="sb:-1" aria-label="Opponents minus one">&minus;</button><input id="sb" type="number" inputmode="numeric" min="0" max="40" placeholder="-"><button class="step" data-a="step" data-v="sb:1" aria-label="Opponents plus one">+</button></div></div></div>
+    <p id="spv" class="m" aria-live="polite">Games go to 11, 15 or 21 and must be won by 2.</p>
+    <button class="btn big" data-a="score" data-v="${m.id}">Enter score</button>`;
+  else if(meP.st==="waiting")body=`<h3>Step 2: confirm the score</h3><div class="note"><b>${esc(m.enteredBy)}</b> entered: your team <b>${res(ag)}</b>. Is that right?</div>
+    <button class="btn big" data-a="agree" data-v="${m.id}">Yes, we ${res(ag)}</button><button class="btn w" data-a="reject" data-v="${m.id}">No, that's wrong</button>`;
+  else body=`<div class="note"><b>Done on your side.</b> Your team ${res(ag)}. ${m.nsub===4?"Everyone has confirmed.":left!=null?`It counts in ${left} min unless someone rejects it, or as soon as all four confirm.`:"Waiting for a player from the other team to confirm."}</div>
+    <button class="btn w" data-a="reject" data-v="${m.id}">Something's wrong: reject</button>`;
+  return `<div class="sheet"><h2>${esc(m.court)}</h2><p class="sub">Playing ${mins} min${m.mixed?". Mixed groups, teams balanced by rating":""}.</p>
+  <div class="court"><div><span class="m">Your team</span>${teamBlock(mineT.n,mineT.r,1)}</div><span class="vs">vs</span><div><span class="m">Opponents</span>${teamBlock(oppT.n,oppT.r)}</div></div>
+  <p class="m">Prediction: your team ${m.exp>=.5?"wins":"loses"} about ${pred}${m.allNR?" (rough, since nobody here has an official rating yet)":""}. Do better than predicted and your rating goes up, even in a loss.</p>
+  ${body}
+  ${m.status!=="disputed"&&can?`<h3>Who has confirmed</h3>${people}<p class="m">The score counts when all four confirm, or 15 minutes after one player on each team has confirmed, unless someone rejects it.</p>`:""}</div>`;
+}
 function players(){
   const list=PL||S.board.map(u=>({...u}));
   const q=v("ps");
@@ -455,7 +486,7 @@ function draw(poll){
   const warn=S.me.defaultPw?`<div class="sheet note warn">Change the default admin password on the Me tab.</div>`:S.me.mustChange?`<div class="sheet note warn">You're using a temporary password. Set your own on the Me tab.</div>`:"";
   el.innerHTML=`${ph}${warn}${body}
   <nav class="tabs" aria-label="Sections"${need?" hidden":""}><div>${tabs.map(([k,n])=>`<button class="${k===tab&&!view?"on":""}"${k===tab?' aria-current="page"':""} data-a="tab" data-v="${k}">${ic(k==="play"?"play":k)}${n}</button>`).join("")}</div></nav>${tt}`;
-  rest();
+  rest();if(document.getElementById("spv"))preview();
   // profiles (including your own match history on Me) load on demand and are refetched after any change
   const want=need?null:view||(tab==="me"?S.me.id:null);if(want&&!P[want])getProfile(want);
   if(showQr&&tab==="admin"&&window.QRCode){const q=document.getElementById("qrbox");if(q&&!q.firstChild)new QRCode(q,{text:qrText,width:200,height:200})}
@@ -463,6 +494,7 @@ function draw(poll){
 const pqs=new URLSearchParams(location.search).get("ci");if(pqs){sessionStorage.setItem("ci",pqs);history.replaceState(null,"",location.pathname)}
 setInterval(()=>{if(T&&showQr&&tab==="admin"&&!document.hidden)refreshQr(true)},30000);
 if(T)load();else draw();
+setInterval(()=>{if(T&&S&&S.match&&tab==="play"&&!view&&!document.hidden)draw(true)},10000);
 let tick=0;setInterval(()=>{tick++;if(T&&!document.hidden&&navigator.onLine&&!view&&(tab==="play"||tick%3===0))load(true)},15000);
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&T)load(true)});
 document.addEventListener("keydown",e=>{if(e.key==="Enter"&&(!T||!S)&&(e.target.id==="u"||e.target.id==="p"))auth()});

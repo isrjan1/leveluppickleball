@@ -145,7 +145,8 @@ test("scores are entered from your own team's point of view, whichever side you'
   await until(() => app.$("#sa"), "score inputs");
   app.$("#sa").value = "11"; app.$("#sb").value = "6"; // "we won 11-6" typed by a right-side player
   app.click("[data-a=score]");
-  await until(() => app.text().includes("You confirmed your team won 11-6"), "own-perspective confirmation");
+  await until(() => app.text().includes("Done on your side. Your team won 11-6"), "own-perspective confirmation");
+  assert.match(app.text(), /Entered the score/);
   const left = await c.ok("state", {}, leftTok);
   assert.deepEqual(left.match.agreed, [6, 11], "stored left-team-first: left side lost 6-11");
   app.close();
@@ -173,5 +174,53 @@ test("opening a facility QR link, then logging in, checks the player in", async 
   app.$("#u").value = "scanner"; app.$("#p").value = "secret123";
   app.click("[data-a=auth]");
   await until(() => app.$(".toast")?.textContent.includes("Checked in"), "checked in");
+  app.close();
+});
+
+test("four players: one enters the score, the others are told exactly what to confirm", async () => {
+  const c = await fresh({ ADMIN_PASSWORD: "x-admin-pw" });
+  const ts = [];
+  for (const n of ["ann", "bob", "cyd", "dan"]) { ts.push(await c.player(n, "198.51.100." + (60 + ts.length))); await c.ok("join", {}, ts.at(-1)); }
+  const app0 = await openApp(c, { token: ts[0] });
+  await until(() => app0.text().includes("Play your game first"), "locked before min time");
+  assert.ok(!app0.$("#sa"), "no score inputs before play time");
+  app0.close();
+  const { advance, MIN } = await import("./helpers/harness.mjs"); advance(6 * MIN);
+  const st = await Promise.all(ts.map(t => c.ok("state", {}, t)));
+  const enterer = ts[0], side0 = st[0].match.side;
+  const teammate = ts[st.findIndex((x, i) => i > 0 && x.match.side === side0)], opp = ts[st.findIndex(x => x.match.side !== side0)];
+  const a = await openApp(c, { token: enterer });
+  await until(() => a.text().includes("Step 1: one player enters the final score"), "step 1");
+  a.click('[data-a=step][data-v="sa:1"]'); for (let i = 0; i < 4; i++) a.click('[data-a=step][data-v="sb:1"]');
+  assert.match(a.$("#spv").textContent, /isn't a valid final score/);
+  a.$("#sa").value = "11"; a.$("#sa").dispatchEvent(new a.w.Event("input", { bubbles: true }));
+  assert.match(a.$("#spv").textContent, /won 11-4/);
+  a.click("[data-a=score]");
+  await until(() => a.text().includes("Done on your side"), "entered");
+  a.close();
+  const b = await openApp(c, { token: opp });
+  await until(() => b.text().includes("Step 2: confirm the score"), "step 2 for opponent");
+  assert.match(b.text(), /entered: your team lost 4-11/);
+  b.click("[data-a=agree]");
+  await until(() => b.text().includes("Done on your side"), "confirmed");
+  assert.equal((b.text().match(/✓/g) || []).length, 2, "two players show a tick");
+  b.close();
+  const t = await openApp(c, { token: teammate });
+  await until(() => t.text().includes("Yes, we won 11-4"), "teammate sees the same score from their side");
+  t.close();
+});
+
+test("a game on screen keeps time and unlocks scoring by itself, without a reload", async () => {
+  const c = await fresh({ ADMIN_PASSWORD: "x-admin-pw" });
+  const ts = [];
+  for (const n of ["tick1", "tick2", "tick3", "tick4"]) { ts.push(await c.player(n, "198.51.100." + (80 + ts.length))); await c.ok("join", {}, ts.at(-1)); }
+  const app = await openApp(c, { token: ts[0] });
+  await until(() => app.text().includes("Playing 0 min"), "fresh game");
+  assert.match(app.text(), /Score entry opens in 5 min/);
+  const { advance, MIN } = await import("./helpers/harness.mjs");
+  advance(7 * MIN); // time passes; nothing about the game itself changes
+  app.w.document.dispatchEvent(new app.w.Event("visibilitychange")); // same as a routine background refresh
+  await until(() => app.text().includes("Playing 7 min"), "clock moved");
+  assert.ok(app.$("#sa"), "score entry unlocked without a reload");
   app.close();
 });

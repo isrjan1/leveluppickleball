@@ -321,7 +321,13 @@ async function snapshot(s, me, cfg, full) {
         A: [await nm(mm.p[0]), await nm(mm.p[1])], B: [await nm(mm.p[2]), await nm(mm.p[3])],
         Ar: us.slice(0, 2).map(u => (rated(u) ? u.r : null)), Br: us.slice(2).map(u => (rated(u) ? u.r : null)),
         side, exp: r3(side ? 1 - expShare(ra, rb) : expShare(ra, rb)), sent: !!mm.sub[me.id], mine: mm.sub[me.id] || null,
-        agreed: first, nsub: Object.keys(mm.sub).length, cf: mm.cf || null, confirm: CONFIRM };
+        agreed: first, nsub: Object.keys(mm.sub).length, cf: mm.cf || null, confirm: CONFIRM,
+        unlock: mm.start + cfg.minMin * 6e4, now: Date.now(), // server clock, so countdowns don't depend on the phone's clock
+        // each player's part in recording the score: the first to submit "entered" it, matching submissions "confirmed"
+        ppl: await Promise.all(mm.p.map(async (id, i) => ({ n: await nm(id), team: i < 2 ? 0 : 1, me: id === me.id,
+          st: !mm.sub[id] ? "waiting" : id === Object.keys(mm.sub)[0] ? "entered" : "confirmed" }))),
+        enteredBy: Object.keys(mm.sub).length ? await nm(Object.keys(mm.sub)[0]) : null,
+        allNR: us.every(u => !rated(u)) };
     })() : null,
     sessions: ss.filter(x => x.status === "open" && x.ts > Date.now()).sort((a, b) => a.ts - b.ts).slice(0, 40).map(x => {
       const n = live.filter(b => b.sid === x.id);
