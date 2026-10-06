@@ -1,17 +1,7 @@
 {
   "name": "the-system",
   "private": true,
-  "version": "8.0.0",
-  "engines": {
-    "node": ">=18"
-  },
-  "scripts": {
-    "test": "node --import ./test/helpers/setup.mjs --test --test-force-exit test/*.test.mjs"
-  },
-  "dependencies": {
-    "@netlify/blobs": ">=8.2.0"
-  },
-  "devDependencies": {
-    "jsdom": "^26.1.0"
-  }
+  "version": "7.1.0",
+  "engines": { "node": ">=18" },
+  "dependencies": { "@netlify/blobs": ">=8.2.0" }
 }
