@@ -269,6 +269,12 @@ async function handle(req, context) {
   const ok = async (msg) => J({ msg: msg || "", ...(await snapshot(s, a === "state" ? me : await getU(s, me.id), CFGW ? { ...DEF, ...(await jget(s, "cfg", {})) } : cfg, !!b.full)) });
 
   if (a === "state") return ok();
+  if (a === "survey") { // self-assessed skill profile: 6 traits, each 1-5; retake every 14 days
+    const v = Array.isArray(b.v) ? b.v.map(Number) : [];
+    if (v.length !== 6 || !v.every(x => int(x, 1, 5))) return E("Answer every question");
+    await mutU(s, me.id, u => { if (u.sk && Date.now() - u.sk.t < 14 * 864e5) throw new Bad("You can retake the survey every 14 days"); u.sk = { v, t: Date.now() }; });
+    return ok("Skill profile saved");
+  }
   if (a === "changePw") {
     const np = String(b.newPw || ""), k = "u:" + me.username.toLowerCase();
     if (await locked(s, k, 8, 9e5)) return E("Too many attempts", 429);
