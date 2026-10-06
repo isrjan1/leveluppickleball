@@ -199,3 +199,31 @@ test("players directory and profiles: search, history with names, admin hidden",
   assert.equal((await c.call("profile", { id: "nope" }, ts[0])).status, 404);
   assert.equal((await c.call("players", {}, "")).status, 401, "members only");
 });
+
+test("once the 15-minute window has passed, the score is final even if nobody refreshed", async () => {
+  const c = await fresh(ADMIN);
+  const ts = await four(c, ["lr1", "lr2", "lr3", "lr4"]);
+  for (const t of ts) await c.ok("join", {}, t);
+  const s = await Promise.all(ts.map(t => c.ok("state", {}, t)));
+  const id = s[0].match.id, a = ts[s.findIndex(x => x.match.side === 0)], b = ts[s.findIndex(x => x.match.side === 1)];
+  const other = ts.find(t => t !== a && t !== b);
+  advance(6 * MIN);
+  await c.ok("score", { matchId: id, a: 11, b: 7 }, a);
+  await c.ok("score", { matchId: id, a: 11, b: 7 }, b);
+  advance(30 * MIN); // nobody polled in between
+  const r = await c.call("reject", { matchId: id }, other);
+  assert.equal(r.status, 400); assert.match(r.body.error, /already counted/);
+  assert.equal((await c.ok("state", {}, other)).me.hist.length, 1);
+});
+
+test("admins resolving a dispute use the same score rules as players", async () => {
+  const c = await fresh(ADMIN);
+  const at = (await c.ok("login", { username: "admin", password: ADMIN.ADMIN_PASSWORD })).token;
+  const ts = await four(c, ["dp1", "dp2", "dp3", "dp4"]);
+  for (const t of ts) await c.ok("join", {}, t);
+  const id = (await c.ok("state", {}, ts[0])).match.id;
+  advance(6 * MIN);
+  await c.ok("score", { matchId: id, a: 11, b: 3 }, ts[0]); await c.ok("reject", { matchId: id }, ts[1]);
+  assert.equal((await c.call("resolve", { matchId: id, a: 1, b: 0 }, at)).status, 400);
+  await c.ok("resolve", { matchId: id, a: 32, b: 30 }, at);
+});

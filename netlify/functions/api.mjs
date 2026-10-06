@@ -180,6 +180,7 @@ const todays = tz => {
 
 // planFinish runs inside the match CAS (reads only); the winner of that CAS applies the result to each player with a per-user CAS,
 // so rating and XP are applied exactly once. XP: underdog upset 2.5x, stomping 0.25x.
+// Repeat groups (3+ same players again within 12h) get both XP and rating change damped to 50%, then 25%.
 async function planFinish(s, m, sa, sb, ms, tz) {
   const us = await Promise.all(m.p.map(id => getU(s, id)));
   if (us.some(u => !u)) { m.status = "done"; m.void = true; m.end = Date.now(); return null; }
@@ -222,6 +223,7 @@ async function applyPlan(s, pl) {
   if (!pl) return;
   const r = await Promise.allSettled(pl.ids.map((id, i) => mutU(s, id, u => applyResult(u, pl, pl.p[i]))));
   r.forEach(x => x.status === "rejected" && console.error("applyPlan", x.reason));
+  await board(s, true).catch(e => console.warn("board refresh", e.message)); // rankings reflect the result immediately
 }
 // Housekeeping on the match list: auto-validate scores both teams agreed on CONFIRM ago (nobody rejected),
 // void abandoned matches (3h) and stale disputes (12h).
@@ -289,9 +291,9 @@ async function board(s, force) {
   return rows;
 }
 // Public profile: what any club member can see about another player.
-async function profile(s, id) {
+async function profile(s, id, self) {
   const u = await getU(s, id);
-  if (!u || u.disabled || u.role === "admin") return null;
+  if (!u || (!self && (u.disabled || u.role === "admin"))) return null;
   const ids = [...new Set(u.hist.slice(-15).flatMap(h => [h.pt, ...h.op]))];
   const names = new Map(await Promise.all(ids.map(async i => [i, (await getU(s, i))?.username || "Former player"])));
   return { id: u.id, n: u.username, r: rated(u) ? u.r : null, pr: rated(u) ? null : rtg(u), ip: u.ip || 0, rel: reliability(u), w: u.w | 0, l: u.l | 0,
@@ -347,10 +349,12 @@ async function snapshot(s, me, cfg, full) {
       age: Math.round((Date.now() - m.start) / 6e4), A: [await nm(m.p[0]), await nm(m.p[1])], B: [await nm(m.p[2]), await nm(m.p[3])],
       sub: await Promise.all(Object.entries(m.sub).map(async ([k, v]) => (await nm(k)) + ": " + v.join("-"))) }))) };
     out.admin.flags = await Promise.all(ms.filter(m => m.flag).slice(-8).map(async m => ({ id: m.id, names: await Promise.all(m.p.map(id => nm(id))) })));
-    if (full) out.admin.users = (await loadAll(s)).map(pub);
+    if (full) out.admin.users = (await loadAll(s)).map(u => { const p = pub(u); delete p.hist; return p; });
   }
   return out;
 }
+// games to 11, 15 or 21, win by 2 (extended games end exactly 2 apart)
+const validScore = (x, y) => { const hi = Math.max(x, y), lo = Math.min(x, y); return int(x, 0, 40) && int(y, 0, 40) && hi - lo >= 2 && ([11, 15, 21].includes(hi) || (hi > 11 && hi - lo === 2)); };
 const goodStr = x => typeof x === "string" && TOK.test(x);
 const int = (x, a, b) => Number.isInteger(x) && x >= a && x <= b;
 
@@ -411,7 +415,7 @@ async function handle(req, context) {
     return J({ players: rows.map(u => ({ ...u, me: u.id === me.id })) });
   }
   if (a === "profile") {
-    const p = await profile(s, String(b.id || ""));
+    const p = await profile(s, String(b.id || ""), String(b.id || "") === me.id);
     return p ? J({ profile: p }) : E("Player not found", 404);
   }
   if (a === "survey") { // self-assessed skill profile: 6 traits, each 1-5; retake every 14 days
@@ -460,14 +464,14 @@ async function handle(req, context) {
     return ok();
   }
   if (a === "score") {
+    await expire(s, cfg.tz); // a score whose 15-minute window passed counts before anyone can change it
     let plan = null, st;
     await mutate(s, "m", [], async ms => {
       plan = null;
       const m = ms.find(x => x.id === b.matchId);
       if (!m || m.status !== "playing" || !m.p.includes(me.id)) throw new Bad("no active match");
-      const x = +b.a, y = +b.b, hi = Math.max(x, y), lo = Math.min(x, y);
-      // games to 11, 15 or 21, win by 2 (extended games end exactly 2 apart)
-      if (!int(x, 0, 40) || !int(y, 0, 40) || hi - lo < 2 || !([11, 15, 21].includes(hi) || (hi > 11 && hi - lo === 2))) throw new Bad("Invalid score: games to 11, 15 or 21, win by 2");
+      const x = +b.a, y = +b.b;
+      if (!validScore(x, y)) throw new Bad("Invalid score: games to 11, 15 or 21, win by 2");
       if (Date.now() - m.start < cfg.minMin * 6e4) throw new Bad(`Match too short (min ${cfg.minMin} min)`);
       m.sub[me.id] = [x, y]; // [teamA score, teamB score]
       const subs = Object.entries(m.sub), v0 = subs[0][1], teamOf = id => (m.p.indexOf(id) < 2 ? 0 : 1);
@@ -482,8 +486,10 @@ async function handle(req, context) {
       : `Score saved. It counts once everyone confirms, or ${CONFIRM / 6e4} min after both teams agree unless someone rejects it.`);
   }
   if (a === "reject") { // any player in the match can reject a submitted score; the admin then decides
+    await expire(s, cfg.tz);
     await mutate(s, "m", [], ms => {
       const m = ms.find(x => x.id === b.matchId);
+      if (m && m.status === "done" && m.auto && m.p.includes(me.id)) throw new Bad("Too late: this score already counted after 15 minutes. Ask the admin if it's wrong.");
       if (!m || m.status !== "playing" || !m.p.includes(me.id) || !Object.keys(m.sub).length) throw new Bad("Nothing to reject");
       m.status = "disputed"; m.rej = me.id;
     });
@@ -639,7 +645,7 @@ async function handle(req, context) {
     await mutate(s, "m", [], async ms => {
       plan = null;
       const m = ms.find(x => x.id === b.matchId && x.status === "disputed"), x = +b.a, y = +b.b;
-      if (!m || !int(x, 0, 30) || !int(y, 0, 30) || x === y) throw new Bad("invalid");
+      if (!m || !validScore(x, y)) throw new Bad("Enter a valid final score: games to 11, 15 or 21, win by 2");
       plan = await planFinish(s, m, x, y, ms, cfg.tz);
     });
     await applyPlan(s, plan); await matchmake(s, cfg);
@@ -649,7 +655,7 @@ async function handle(req, context) {
   if (a === "setDisabled") {
     const id = String(b.id || "");
     if (id === me.id) return E("invalid");
-    await mutU(s, id, u => { u.disabled = !!b.disabled; }); await coaches(s, true);
+    await mutU(s, id, u => { u.disabled = !!b.disabled; }); await Promise.all([coaches(s, true), board(s, true)]);
     await mutate(s, "q", [], q => q.filter(x => x.id !== id));
     return ok(b.disabled ? "User disabled" : "User enabled");
   }

@@ -305,14 +305,14 @@ function login(){return `<div class="welcome"><div class="hero">${COURT}<h1>Leve
 function hero(p,{self,back}={}){
   const nr=p.r==null,games=(p.w|0)+(p.l|0),rel=p.rel|0;
   const relTxt=nr?(self?`<b>NR means not rated yet.</b> Your estimate is ${fmtR(p.pr)}. Play about ${Math.max(1,Math.ceil(3-(p.ip||0)))} more game${Math.ceil(3-(p.ip||0))===1?"":"s"} against rated players to get your official rating.`:`<b>Not rated yet.</b> Estimated ${fmtR(p.pr)} from ${(p.w|0)+(p.l|0)} game${(p.w|0)+(p.l|0)===1?"":"s"}.`)
-    :rel>=60?`<b>${rel}% reliable.</b> This rating is well established.`:`<b>${rel}% reliable.</b> ${self?"Play with more different partners and opponents to make your rating more reliable.":"Still settling in."}`;
+    :rel===0?`<b>Reliability builds as you play.</b> ${self?"Play a few games with different partners and opponents.":"No recent games yet."}`:rel>=60?`<b>${rel}% reliable.</b> This rating is well established.`:`<b>${rel}% reliable.</b> ${self?"Play with more different partners and opponents to make your rating more reliable.":"Still settling in."}`;
   return `<div class="hero">${COURT}${back?`<button class="back" data-a="back">&lsaquo; Back</button>`:""}
   <div class="who">${av(p.n,1)}<div><b>${esc(p.n)}</b><div class="lv">${esc(levelOf(p.r))}${p.coach?", certified coach":""}${p.src==="coach"?", coach-rated start":""}</div></div></div>
   <div class="rating">${bigR(p.r)}<div class="side"><b>Doubles</b>club rating</div></div>
   <div class="rel"><div class="track"><i style="width:${nr?0:rel}%"></i></div><p>${relTxt}</p></div>
   ${games?`<div class="stats"><div><b>${games}</b><span>Games</span></div><div><b>${p.w|0}-${p.l|0}</b><span>Won-lost</span></div><div><b>${Math.round((p.w|0)/games*100)}%</b><span>Win rate</span></div></div>`:""}</div>`;
 }
-function history(h){
+function histRows(h){
   if(!h)return`<p class="empty">Loading matches...</p>`;
   if(!h.length)return`<p class="empty">No rated matches yet. Join the open play queue to get started.</p>`;
   return opts(h,x=>`<div class="row"><span class="wl${x.w?" w":""}" aria-label="${x.w?"Win":"Loss"}">${x.w?"W":"L"}</span><div class="g1"><span class="n">${x.s[0]}-${x.s[1]}</span> <span class="m">with ${esc(x.pt)} vs ${x.op.map(esc).join(" and ")}</span><div class="m">${day(x.t)}, expected ${expScore(x.ex??.5)}${x.nr?", provisional":""}</div></div><b class="${x.d>=0?"up":"down"}">${signed(x.d)}</b></div>`);
@@ -369,7 +369,7 @@ function profileView(id){
   const p=P[id];
   if(!p||p==="loading")return`<div class="hero">${COURT}<button class="back" data-a="back">&lsaquo; Back</button><p style="position:relative">Loading profile...</p></div>`;
   if(p.err)return`<div class="hero">${COURT}<button class="back" data-a="back">&lsaquo; Back</button><p style="position:relative">${esc(p.err)}</p></div>`;
-  return hero(p,{back:1})+`<div class="sheet"><h2>Recent matches</h2>${history(p.hist)}</div>
+  return hero(p,{back:1})+`<div class="sheet"><h2>Recent matches</h2>${histRows(p.hist)}</div>
   <div class="sheet"><h2>Skill badges</h2>${p.badges.length?p.badges.map(k=>`<span class="chip on">${esc((S.badgeDefs[k]||{}).n||k)}</span>`).join(""):`<p class="m">No badges yet.</p>`}</div>
   ${p.sk?`<div class="sheet"><h2>Skill Trait Gram</h2>${radar(p.sk.v)}<p class="m" style="text-align:center">Self-assessed.</p></div>`:""}`;
 }
@@ -382,7 +382,7 @@ function quests(){
 function me(){
   const u=S.me,L=lvl(u.xp),lo=50*(L-1)**2,hi=50*L*L,bd=S.badgeDefs,mp=P[u.id];
   return hero({...u,n:u.username,t:u.tier,coach:u.role==="certified_coach"},{self:1})+`
-  <div class="sheet"><h2>Match history</h2>${history(mp&&mp!=="loading"&&!mp.err?mp.hist:null)}</div>
+  <div class="sheet"><h2>Match history</h2>${histRows(mp&&mp!=="loading"&&!mp.err?mp.hist:null)}</div>
   <div class="sheet"><h2>Level ${L}</h2><div class="xp"><i style="width:${Math.round((u.xp-lo)/(hi-lo)*100)}%"></i></div>
   <p class="m">${u.xp} XP, ${hi-u.xp} to level ${L+1}. XP comes from matches, quests, lessons and homework. It doesn't affect your rating.</p>
   ${u.cap&&u.xp>=u.cap.xp?`<div class="note warn">You've hit the ${u.cap.xp} XP ceiling for your tier. Pass the next skill badge with a coach to keep earning XP.</div>`:u.cap?`<p class="m">XP ceiling in this tier: ${u.cap.xp}.</p>`:""}

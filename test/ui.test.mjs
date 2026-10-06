@@ -12,10 +12,10 @@ async function until(fn, what, ms = 3000) {
   throw new Error("timed out waiting for " + what);
 }
 
-async function openApp(c, { token, confirmAnswer = true, failFetch = false, html = HTML } = {}) {
+async function openApp(c, { token, confirmAnswer = true, failFetch = false, html = HTML, url = "https://club.test/" } = {}) {
   const calls = [];
   const dom = new JSDOM(html, {
-    url: "https://club.test/", runScripts: "dangerously", pretendToBeVisual: true,
+    url, runScripts: "dangerously", pretendToBeVisual: true,
     beforeParse(w) {
       if (token) w.localStorage.setItem("pt", token);
       w.confirm = () => w.__confirm;
@@ -148,5 +148,30 @@ test("scores are entered from your own team's point of view, whichever side you'
   await until(() => app.text().includes("You confirmed your team won 11-6"), "own-perspective confirmation");
   const left = await c.ok("state", {}, leftTok);
   assert.deepEqual(left.match.agreed, [6, 11], "stored left-team-first: left side lost 6-11");
+  app.close();
+});
+
+test("no top-level name in the page shadows a browser global (e.g. a function called history)", () => {
+  const js = HTML.match(/<script>([\s\S]*)<\/script>/)[1];
+  const names = new Set([...js.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm)].map(m => m[1]));
+  for (const m of js.matchAll(/^(?:const|let|var)\s+([^;]+)/gm)) for (const d of m[1].split(/,(?![^(\[{]*[)\]}])/)) { const n = d.trim().match(/^([A-Za-z_$][\w$]*)\s*=/); if (n) names.add(n[1]); }
+  const w = new JSDOM("", { url: "https://club.test/" }).window;
+  const globals = new Set(["history", "location", "name", "status", "close", "open", "print", "stop", "focus", "blur", "scroll", "top", "parent", "self", "length", "event", "origin", "find", "frames", "opener", "closed", "screen", "navigator", "document", "alert", "confirm", "prompt", "fetch", ...Object.getOwnPropertyNames(w)]);
+  w.close();
+  const clash = [...names].filter(n => globals.has(n));
+  assert.deepEqual(clash, [], "rename these: " + clash.join(", "));
+});
+
+test("opening a facility QR link, then logging in, checks the player in", async () => {
+  const c = await fresh({ ADMIN_PASSWORD: "x-admin-pw" });
+  const at = (await c.ok("login", { username: "admin", password: "x-admin-pw" })).token;
+  await c.ok("setCfg", { qr: true, courts: "Court 1", rad: 150, minMin: 5, tz: "UTC" }, at);
+  const code = (await c.ok("qrCode", {}, at)).code;
+  await c.register("scanner", "198.51.100.40");
+  const app = await openApp(c, { url: "https://club.test/?ci=" + code });
+  assert.equal(app.w.location.search, "", "code removed from the address bar");
+  app.$("#u").value = "scanner"; app.$("#p").value = "secret123";
+  app.click("[data-a=auth]");
+  await until(() => app.$(".toast")?.textContent.includes("Checked in"), "checked in");
   app.close();
 });
