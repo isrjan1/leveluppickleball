@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pickleball Level Up</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" defer onload="typeof draw==='function'&&draw(true)"></script>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<meta name="theme-color" content="#06140c">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Figtree:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#eaf6ee;--panel:#fff;--panel2:#f1faf4;--line:#a9d6b8;--accent:#1f8f4a;--text:#0d1b3a;--muted:#56698d;--danger:#d63a52;--on:#fff;
+--disp:Rajdhani,"Arial Narrow",system-ui,sans-serif;--body:Figtree,system-ui,-apple-system,"Segoe UI",sans-serif}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#06140c;--panel:#0a2014;--panel2:#0e2a1b;--line:#27704a;--accent:#5be08a;--text:#d8e8ff;--muted:#8197bd;--danger:#ff6277;--on:#04122b}}
+:root[data-theme=dark]{--bg:#06140c;--panel:#0a2014;--panel2:#0e2a1b;--line:#27704a;--accent:#5be08a;--text:#d8e8ff;--muted:#8197bd;--danger:#ff6277;--on:#04122b}
+*,*::before,*::after{box-sizing:inherit}
+html,body{margin:0}
+body{background:var(--bg);color:var(--text);font:16px/1.5 var(--body);min-height:100%}
+button,input,select{font:inherit;color:inherit}button{cursor:pointer}
+.app{max-width:600px;margin:0 auto;padding:16px 16px 96px}
+.win{background:var(--panel);border:1px solid var(--line);padding:14px;margin:0 0 14px}
+h2{font:700 22px/1.1 var(--disp);margin:0 0 10px;color:var(--accent)}
+.sub,.m{color:var(--muted);font-size:14px}
+.btn{background:var(--accent);color:var(--on);border:1px solid var(--accent);padding:8px 14px;font-weight:600;margin:2px 4px 2px 0}
+.btn.g{background:transparent;color:var(--accent)}.btn.w{background:var(--danger);border-color:var(--danger);color:#fff}
+.btn:disabled{opacity:.45}
+input,select{background:var(--panel2);border:1px solid var(--line);padding:8px;margin:2px 4px 2px 0;max-width:100%}
+input.s{width:64px}
+.row{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line);flex-wrap:wrap}
+.row:first-of-type{border-top:0}.row>.g1{flex:1;min-width:140px}
+.bar{height:10px;background:var(--panel2);border:1px solid var(--line)}.bar>i{display:block;height:100%;background:var(--accent)}
+.big{font:700 56px/1 var(--disp)}
+.top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:12px}
+.top b{font:700 24px var(--disp)}
+.tabs{position:fixed;left:0;right:0;bottom:0;display:flex;background:var(--panel);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0px);overflow-x:auto}
+.tabs button{flex:1;min-width:64px;background:none;border:0;padding:12px 6px;font:700 15px var(--disp);color:var(--muted)}
+.tabs button.on{color:var(--accent);box-shadow:inset 0 3px 0 var(--accent)}
+.tag{font:700 13px var(--disp);color:var(--accent);border:1px solid var(--line);padding:0 8px;margin-right:4px}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(72px + env(safe-area-inset-bottom,0px));background:var(--text);color:var(--bg);padding:8px 14px;max-width:90%;z-index:9}
+.vs{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;text-align:center;align-items:center;margin:8px 0}
+.err{color:var(--danger)}
+.days{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:6px}
+.days button{flex:none;min-width:48px;background:var(--panel2);border:1px solid var(--line);padding:4px 6px;display:flex;flex-direction:column;align-items:center}
+.days button.on{background:var(--accent);color:var(--on)}.days i{font-style:normal;font-size:11px;min-height:14px}.days b{font:700 18px var(--disp)}
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+<script>
+const $=s=>document.querySelector(s);
+let T=localStorage.getItem("pt"),S=null,tab="play",toast="",authMode="login",qrText="",qrCode="",showQr=false,calDay=null;
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+async function api(action,d={}){
+  const r=await fetch("/api",{method:"POST",headers:{"content-type":"application/json",authorization:"Bearer "+(T||"")},body:JSON.stringify({action,full:tab==="admin",...d})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){if(r.status===401&&T){T=null;localStorage.removeItem("pt")}throw new Error(j.error||"Error")}
+  return j;
+}
+const v=id=>{const e=document.getElementById(id);return e?e.value:""};
+const lvl=x=>Math.floor(Math.sqrt(x/50))+1;
+const when=t=>new Date(t).toLocaleString([],{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}),money=c=>c?"₱"+(c/100).toLocaleString(undefined,{maximumFractionDigits:2}):"Free";
+const tm=t=>new Date(t).toLocaleTimeString([],{hour:"numeric",minute:"2-digit"});
+const dk=t=>{const d=new Date(t);return d.getFullYear()+"-"+(d.getMonth()+1)+"-"+d.getDate()};
+function ics(id){const b=S.bookings.find(x=>x.id===id);if(!b)return;
+  const f=t=>new Date(t).toISOString().replace(/[-:]/g,"").slice(0,15)+"Z",e=b.ts+(b.dur||(b.kind==="clinic"?90:60))*6e4;
+  const t=["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//Pickleball Level Up//EN","BEGIN:VEVENT","UID:"+b.id+"@pickleball","DTSTAMP:"+f(Date.now()),"DTSTART:"+f(b.ts),"DTEND:"+f(e),
+  "SUMMARY:"+(b.title+" with "+b.cn).replace(/[,;\n]/g," "),"BEGIN:VALARM","ACTION:DISPLAY","DESCRIPTION:Pickleball session soon","TRIGGER:-PT2H","END:VALARM",
+  "BEGIN:VALARM","ACTION:DISPLAY","DESCRIPTION:Pickleball session tomorrow","TRIGGER:-P1D","END:VALARM","END:VEVENT","END:VCALENDAR"].join("\r\n");
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([t],{type:"text/calendar"}));a.download="session.ics";document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),4e3)}
+const ago=t=>Math.max(0,Math.round((Date.now()-t)/6e4));
+
+async function run(action,d){
+  try{const j=await api(action,d);if(j.token){T=j.token;localStorage.setItem("pt",T)}if(j.me){seq++;S=j;say(j.msg||"")}else{await load();return}}
+  catch(e){say(e.message,1)}
+  draw();
+}
+let toastT,seq=0;
+function say(m,bad){toast=m?(bad?"! ":"")+m:"";clearTimeout(toastT);if(m)toastT=setTimeout(()=>{toast="";const t=document.querySelector(".toast");if(t)t.remove()},m.startsWith("Invite")?60000:3500)}
+let lastJ="";
+async function load(poll){const n=++seq;let same=false;try{const j=await api("state");if(n===seq){const k=JSON.stringify({...j,msg:0});same=poll&&k===lastJ;lastJ=k;S=j}}catch(e){}if(!same)draw(poll);const c=sessionStorage.getItem("ci");if(c&&S){sessionStorage.removeItem("ci");run("checkin",{code:c})}}
+async function refreshQr(poll){try{const j=await api("qrCode");qrCode=j.code;qrText=location.origin+"/?ci="+j.code}catch(e){say(e.message,1)}draw(poll)}
+
+async function auth(){
+  const u=v("u").trim(),p=v("p");
+  try{const j=await api(authMode==="reg"?"register":"login",{username:u,password:p});T=j.token;localStorage.setItem("pt",T);await load()}
+  catch(e){say(e.message==="taken"?"Name taken":e.message==="invalid"?"Name 3-20 letters/numbers, password 6+":/Too many|disabled/.test(e.message)?e.message:"Wrong name or password",1);draw()}
+}
+function geo(){
+  say("Checking location...");draw();
+  const go=(lat,lng)=>run("checkin",{lat,lng});
+  if(!navigator.geolocation)return go();
+  navigator.geolocation.getCurrentPosition(p=>go(p.coords.latitude,p.coords.longitude),()=>go(),{enableHighAccuracy:true,timeout:8000});
+}
+const A={
+  checkin:()=>S.qr?run("checkin",{code:v("fc")}):geo(),qrOn:async()=>{showQr=true;await refreshQr()},qrOff:()=>{showQr=false;draw()},join:()=>run("join"),leave:()=>run("leave"),
+  claim:x=>run("claim",{qid:x}),book:x=>run("book",{sessionId:x}),cancel:x=>run("cancel",{id:x}),day:x=>{calDay=x||null;draw()},ics,ref:x=>run("ref",{id:x,ref:v("rf"+x)}),setPay:()=>run("setPay",{text:v("cp")}),
+  addSession:()=>{const w=v("sw");run("addSession",{kind:v("sk"),ts:w?new Date(w).getTime():0,title:v("st"),price:+v("sp"),cap:+v("sc"),dur:+v("sd")})},
+  cancelSession:x=>run("cancelSession",{sid:x}),paid:x=>run("paid",{id:x}),
+  score:x=>run("score",{matchId:x,a:+v("sa"),b:+v("sb")}),
+  attend:()=>run("attend",{id:v("bid")}),
+  assess:x=>run("assess",{playerId:v("stu"),badge:v("bdg"),pass:x==="1"}),
+  assign:()=>run("assign",{playerId:v("hs"),title:v("ht"),xp:+v("hx")}),
+  approve:x=>run("approve",{id:x}),
+  setRole:x=>run("setRole",{id:x,role:v("r"+x)}),resetElo:x=>run("resetElo",{id:x}),
+  resolve:x=>run("resolve",{matchId:x,a:+v("ra"+x),b:+v("rb"+x)}),
+  setCfg:()=>run("setCfg",{qr:document.getElementById("cq").checked,tz:v("ct"),courts:v("cc"),lat:v("cl"),lng:v("cn"),rad:v("cr"),minMin:v("cm")}),
+  pw:async()=>{const n=v("np");if(n.length<6){say("Use 6+ characters",1);return draw()}
+    await run("changePw",{oldPw:v("op"),newPw:n});["op","np"].forEach(i=>{const e=document.getElementById(i);if(e)e.value=""})},
+  setDisabled:x=>{const u=(S.admin.users||[]).find(u=>u.id===x);if(u)run("setDisabled",{id:x,disabled:!u.disabled})},
+  voidMatch:x=>run("voidMatch",{matchId:x}),invite:()=>run("invite"),redeem:()=>run("redeem",{token:v("tk")}),
+  logout:()=>{T=null;S=null;showQr=false;calDay=null;tab="play";localStorage.removeItem("pt");draw()},auth,
+  mode:()=>{authMode=authMode==="login"?"reg":"login";draw()},
+  tab:x=>{tab=x;draw();if(x==="admin")load()}
+};
+document.addEventListener("click",e=>{const b=e.target.closest("[data-a]");if(b&&A[b.dataset.a])A[b.dataset.a](b.dataset.v)});
+
+const opts=(l,f)=>l.map(f).join("");
+function login(){return `<div class="win"><h2>Pickleball Level Up</h2><p class="sub">Play ranked open play, finish quests, earn skill badges from certified coaches.</p>
+<input id="u" placeholder="Username" autocapitalize="none" autocomplete="username"><input id="p" type="password" placeholder="Password" autocomplete="current-password">
+<div><button class="btn" data-a="auth">${authMode==="reg"?"Create player account":"Log in"}</button>
+<button class="btn g" data-a="mode">${authMode==="reg"?"I have an account":"New player"}</button></div></div>`}
+
+function play(){
+  const m=S.match,q=S.queue,t=S.me.tier,nb=S.bookings.filter(b=>b.status==="booked"&&b.ts>Date.now()-36e5&&b.ts-Date.now()<864e5).sort((a,b)=>a.ts-b.ts)[0];
+  let h=nb?`<div class="win"><h2>Coming up</h2><p>${esc(nb.title)} with ${esc(nb.cn)}, ${when(nb.ts)}<br><span class="m">Check-in code: <b>${nb.id}</b></span></p></div>`:"";
+  if(m){
+    const mins=ago(m.start),can=mins>=m.minMin;
+    h+=`<div class="win"><h2>${esc(m.court)}${m.status==="disputed"?" (disputed)":""}</h2>
+    <div class="vs"><div><b>${m.A.map(esc).join("<br>")}</b></div><span class="m">vs</span><div><b>${m.B.map(esc).join("<br>")}</b></div></div>
+    <p class="m">Playing ${mins} min. ${can?"":`Scores unlock after ${m.minMin} min.`}</p>
+    ${m.status==="disputed"?`<p class="err">Scores did not match. An admin will decide.</p>`:m.sent?`<p class="m">Your score is in. Waiting for the other team.</p>`:
+    `<span class="m">Final score: left team first, right team second</span><br><input class="s" id="sa" type="number" min="0" max="30" placeholder="Left"><input class="s" id="sb" type="number" min="0" max="30" placeholder="Right"><button class="btn" ${can?"":"disabled"} data-a="score" data-v="${m.id}">Confirm score</button>`}</div>`;
+  }else{
+    h+=`<div class="win"><h2>Open play: ${S.tiers[t]} queue</h2>
+    <p class="m">${S.checked?"Checked in at the facility.":"Check in at the facility to join the queue."}</p>
+    ${S.checked?"":S.qr?`<input id="fc" placeholder="Facility code" autocapitalize="characters"><button class="btn" data-a="checkin">Check in</button><p class="m">Or scan the QR code at the facility with your phone camera.</p>`:`<button class="btn" data-a="checkin">Check in (location)</button>`}
+    ${S.checked?(S.inQueue?`<button class="btn w" data-a="leave">Leave queue</button>`:`<button class="btn" data-a="join">Join queue</button>`):""}
+    <p class="m">Waiting: ${S.tiers.map((n,i)=>n+" "+q[i]).join(", ")}. A match starts when 4 players in a tier are ready.</p></div>`;
+  }
+  if(S.me.last)h+=`<div class="win"><h2>Last match</h2><p>${esc(S.me.last)}</p></div>`;
+  return h;
+}
+function quests(){
+  return `<div class="win"><h2>Daily home quests</h2><p class="sub">Self-reported at home. Resets daily.</p>${opts(S.today,q=>`<div class="row"><div class="g1">${esc(q.t)}<div class="m">+${q.xp} XP</div></div>
+  ${q.done?`<span class="tag">Done</span>`:`<button class="btn" data-a="claim" data-v="${q.id}">Claim</button>`}</div>`)}</div>
+  <div class="win"><h2>Coach homework</h2><p class="sub">Only your coach can approve these.</p>
+  ${S.homework.length?opts(S.homework.slice().reverse().slice(0,15),h=>`<div class="row"><div class="g1">${esc(h.title)}<div class="m">from ${esc(h.cn)}, +${h.xp} XP</div></div><span class="tag">${h.status==="done"?"Approved":"Awaiting coach"}</span></div>`):`<p class="m">No homework yet. Book a coach to get some.</p>`}</div>`;
+}
+function me(){
+  const u=S.me,L=lvl(u.xp),lo=50*(L-1)**2,hi=50*L*L,bd=S.badgeDefs;
+  return `<div class="win"><div class="m">Level</div><div class="big">${L}</div><div class="bar"><i style="width:${Math.round((u.xp-lo)/(hi-lo)*100)}%"></i></div>
+  <p class="m">${u.xp} XP, ${hi-u.xp} to next level. Elo ${u.elo}. Record ${u.w}-${u.l}.</p>
+  ${u.cap&&(u.xp>=u.cap.xp||u.elo>=u.cap.elo)?`<p class="err">Tier ceiling reached (Elo ${u.cap.elo}, ${u.cap.xp} XP). Book a coach and pass the next badge to keep climbing.</p>`:u.cap?`<p class="m">Ceiling in this tier: Elo ${u.cap.elo}, ${u.cap.xp} XP.</p>`:""}
+  ${u.bank?`<p class="m">Banked XP: ${u.bank}. Released when you pass the next badge.</p>`:""}
+  <p><span class="tag">${S.tiers[u.tier]}</span>${u.tier<2?`<span class="m">Next tier needs: ${bd[u.tier===0?"dink_master":"third_shot_pro"].n}, signed off by a coach</span>`:`<span class="m">Top tier unlocked</span>`}</p></div>
+  <div class="win"><h2>Skill badges</h2>${Object.entries(bd).map(([k,d])=>`<span class="tag" style="opacity:${u.badges.includes(k)?1:.4}">${esc(d.n)}</span>`).join("")}</div>
+  ${u.role==="player"?`<div class="win"><h2>Coach invite</h2><input id="tk" placeholder="Invite token from admin"><button class="btn g" data-a="redeem">Redeem</button></div>`:""}
+  <div class="win"><h2>Password</h2><input id="op" type="password" placeholder="Current"><input id="np" type="password" placeholder="New (6+ chars)"><button class="btn g" data-a="pw">Change</button></div>
+  <button class="btn g" data-a="logout">Log out</button>`;
+}
+function cal(){
+  const days=[...Array(14)].map((_,i)=>{const d=new Date();d.setDate(d.getDate()+i);return d}),n={};
+  S.sessions.forEach(x=>{const k=dk(x.ts);n[k]=(n[k]||0)+1});
+  const list=S.sessions.filter(x=>!calDay||dk(x.ts)===calDay);
+  return `<div class="win"><h2>Session calendar</h2><div class="days"><button class="${!calDay?"on":""}" data-a="day" data-v=""><b>All</b><i>${S.sessions.length}</i></button>${days.map(d=>{const k=dk(d.getTime());return `<button class="${calDay===k?"on":""}" data-a="day" data-v="${k}"><span class="m">${d.toLocaleDateString([],{weekday:"short"})}</span><b>${d.getDate()}</b><i>${n[k]||""}</i></button>`}).join("")}</div>
+  ${list.length?opts(list,x=>`<div class="row"><div class="g1">${esc(x.title)}<div class="m">${esc(x.coach)}, ${x.kind} ${x.dur} min, ${when(x.ts)}<br>${money(x.price)}, ${x.left} spot${x.left===1?"":"s"} left</div></div>${x.mine?`<span class="tag">Booked</span>`:x.own?"":`<button class="btn" ${x.left<1?"disabled":""} data-a="book" data-v="${x.id}">Book</button>`}</div>`):`<p class="m">No sessions ${calDay?"on that day":"yet"}.</p>`}</div>
+  <div class="win"><h2>My bookings</h2>${S.bookings.length?opts(S.bookings.slice().reverse(),b=>`<div class="row"><div class="g1">${esc(b.title)} with ${esc(b.cn)}<div class="m">${when(b.ts)}, ${money(b.price)}, ${b.paid?"paid":"unpaid"}<br>Code: <b>${b.id}</b>${!b.paid&&b.price&&b.status!=="cancelled"?`<br>Pay via: ${esc(b.pay||"ask your coach")}<br>${b.ref?`Ref ${esc(b.ref)} sent, waiting for coach`:`<input id="rf${b.id}" placeholder="E-wallet reference no."><button class="btn g" data-a="ref" data-v="${b.id}">Send</button>`}`:""}</div></div><span class="tag">${b.status}</span>${b.status==="booked"?`<button class="btn g" data-a="ics" data-v="${b.id}">Add reminder</button><button class="btn g" data-a="cancel" data-v="${b.id}">Cancel</button>`:""}</div>`):`<p class="m">Nothing booked yet.</p>`}<p class="m">Add reminder saves the session to your phone calendar with alerts 1 day and 2 hours before.</p></div>`;
+}
+function board(){return `<div class="win"><h2>Ranked leaderboard</h2>${opts(S.board,(u,i)=>`<div class="row"><b>${i+1}</b><div class="g1">${esc(u.n)}${u.me?" (you)":""}<div class="m">${S.tiers[u.t]}, Lv ${lvl(u.x)}</div></div><b>${u.e}</b></div>`)}</div>`}
+function coach(){
+  const c=S.coach;
+  return `<div class="win"><h2>Publish a session</h2><p class="sub">Your schedule is listed by day below. Overlapping sessions are blocked.</p><select id="sk"><option value="lesson">Private lesson</option><option value="clinic">Clinic</option></select>
+  <input id="sw" type="datetime-local"><input id="st" placeholder="Title, e.g. Dink basics"><br><span class="m">Price ₱</span><input class="s" id="sp" type="number" min="0" value="800"> <span class="m">Spots (clinic)</span><input class="s" id="sc" type="number" min="2" value="8"> <span class="m">Minutes</span><input class="s" id="sd" type="number" min="30" max="240" value="60"><button class="btn" data-a="addSession">Publish</button>
+  ${(()=>{let last="";return c.sessions.map(x=>{const d=dk(x.ts),h=d!==last?(last=d,`<p class="m" style="margin:12px 0 0"><b>${new Date(x.ts).toLocaleDateString([],{weekday:"long",month:"short",day:"numeric"})}</b></p>`):"",w=c.who[x.id]||[];return h+`<div class="row"><div class="g1">${tm(x.ts)} to ${tm(x.ts+x.dur*6e4)}: ${esc(x.title)}<div class="m">${x.kind}, ${money(x.price)}, ${x.booked}/${x.cap} booked${w.length?" ("+w.map(esc).join(", ")+")":""}</div></div><button class="btn w" data-a="cancelSession" data-v="${x.id}">Cancel</button></div>`}).join("")})()}</div>
+  <div class="win"><h2>Payments</h2><p class="m">Paid ${money(c.revenue)}. Outstanding ${money(c.due)}. Players pay you directly by GCash or another e-wallet. Confirm here once received.</p>
+  <input id="cp" style="width:100%" placeholder="Your GCash / e-wallet number and name" value="${esc(S.me.pay||"")}"><button class="btn g" data-a="setPay">Save payment details</button>${opts(c.bookings.filter(b=>b.status!=="cancelled"&&b.price).slice(0,10),b=>`<div class="row"><div class="g1">${esc(b.pn)}<div class="m">${esc(b.title||b.kind)}, ${money(b.price)}${b.ref?", ref "+esc(b.ref):""}</div></div><button class="btn ${b.paid?"":"g"}" data-a="paid" data-v="${b.id}">${b.paid?"Paid":"Mark paid"}</button></div>`)}</div>
+  <div class="win"><h2>Check in a student</h2><p class="sub">Enter the booking code shown on the player's Me tab.</p><input id="bid" placeholder="Booking code"><button class="btn" data-a="attend">Check in (+40 XP)</button>
+  ${opts(c.bookings.filter(b=>b.status==="booked").slice(0,8),b=>`<div class="row m">${esc(b.pn)}: ${b.id} (${when(b.ts)})</div>`)}</div>
+  <div class="win"><h2>Skill assessment</h2>${c.students.length?`<select id="stu">${opts(c.students,s=>`<option value="${s.id}">${esc(s.n)} (${S.tiers[s.t]})</option>`)}</select>
+  <select id="bdg">${opts(Object.entries(S.badgeDefs),([k,d])=>`<option value="${k}">${esc(d.n)}</option>`)}</select>
+  <div><button class="btn" data-a="assess" data-v="1">Pass</button><button class="btn w" data-a="assess" data-v="0">Not yet</button></div>`:`<p class="m">Students appear after you check in a booking.</p>`}</div>
+  <div class="win"><h2>Assign homework</h2>${c.students.length?`<select id="hs">${opts(c.students,s=>`<option value="${s.id}">${esc(s.n)}</option>`)}</select><input id="ht" placeholder="Drill, e.g. 100 cross-court dinks"><input class="s" id="hx" type="number" value="30"><button class="btn" data-a="assign">Assign</button>`:`<p class="m">No students yet.</p>`}
+  ${opts(c.hw.filter(h=>h.status==="open"),h=>`<div class="row"><div class="g1">${esc(h.sn)}: ${esc(h.title)}<div class="m">+${h.xp} XP</div></div><button class="btn" data-a="approve" data-v="${h.id}">Approve</button></div>`)}</div>`;
+}
+function admin(){
+  const a=S.admin,c=a.cfg;
+  return `<div class="win"><h2>Live and disputed matches</h2>${a.disputes.length?opts(a.disputes,d=>`<div class="row"><div class="g1">${esc(d.court)} (${d.st}, ${d.age} min): ${d.A.map(esc).join("/")} vs ${d.B.map(esc).join("/")}<div class="m">${d.sub.map(esc).join("; ")}</div></div>
+  ${d.st==="disputed"?`<input class="s" id="ra${d.id}" type="number" placeholder="A"><input class="s" id="rb${d.id}" type="number" placeholder="B"><button class="btn" data-a="resolve" data-v="${d.id}">Set</button>`:""}<button class="btn w" data-a="voidMatch" data-v="${d.id}">Void</button></div>`):`<p class="m">None.</p>`}</div>
+  <div class="win"><h2>Check-in screen</h2><p class="m">Show this on a tablet at the front desk. The code changes every minute.</p>${showQr?`<div id="qrbox" style="background:#fff;padding:12px;display:inline-block"></div><p class="big">${esc(qrCode)}</p><button class="btn g" data-a="qrOff">Hide</button>`:`<button class="btn" data-a="qrOn">Show code</button>`}</div>
+  <div class="win"><h2>Flagged repeat groups</h2>${(a.flags||[]).length?opts(a.flags,f=>`<div class="row m">${f.names.map(esc).join(", ")}</div>`):`<p class="m">None.</p>`}</div>
+  <div class="win"><h2>Facility</h2><span class="m">Courts (comma separated)</span><br><input id="cc" value="${esc(c.courts.join(", "))}"><br>
+  <span class="m">Geofence latitude, longitude, radius m (blank = off)</span><br><input class="s" style="width:100px" id="cl" value="${c.lat??""}"><input class="s" style="width:100px" id="cn" value="${c.lng??""}"><input class="s" id="cr" value="${c.rad}"><br>
+  <span class="m">Minimum match minutes before scoring</span> <input class="s" id="cm" value="${c.minMin}"><br><label class="m"><input type="checkbox" id="cq" ${c.qr?"checked":""}> Require the facility QR code to check in (replaces GPS)</label><br><span class="m">Club time zone (quests reset at its midnight). Your device: ${Intl.DateTimeFormat().resolvedOptions().timeZone}</span><br><input id="ct" value="${esc(c.tz)}" placeholder="America/New_York"><br><button class="btn" data-a="setCfg">Save</button></div>
+  <div class="win"><h2>Coach invites</h2><button class="btn" data-a="invite">New invite token</button>${a.cfg.inv.map(t=>`<div class="row m">${t}</div>`).join("")}<p class="m">Single-use. Give to a verified coach.</p></div>
+  <div class="win"><h2>Users</h2>${opts(a.users||[],u=>`<div class="row"><div class="g1">${esc(u.username)}${u.disabled?" (disabled)":""}<div class="m">Elo ${u.elo}, ${u.xp} XP</div></div>
+  <select id="r${u.id}">${opts(["player","certified_coach","admin"],r=>`<option ${r===u.role?"selected":""}>${r}</option>`)}</select>
+  <button class="btn g" data-a="setRole" data-v="${u.id}">Set</button><button class="btn g" data-a="resetElo" data-v="${u.id}">Reset rank</button><button class="btn g" data-a="setDisabled" data-v="${u.id}">${u.disabled?"Enable":"Disable"}</button></div>`)}</div>`;
+}
+function draw(poll){
+  const el=$("#app"),f=document.activeElement;
+  if(poll&&f&&/INPUT|SELECT/.test(f.tagName)&&el.contains(f))return;
+  const vals={},chk={};el.querySelectorAll("input[id],select[id]").forEach(e=>{if(e.type==="checkbox")chk[e.id]=e.checked;else vals[e.id]=e.value});
+  const dsl=(el.querySelector(".days")||{}).scrollLeft||0,fid=f&&f.id&&el.contains(f)?f.id:null;let sel=null;try{if(fid&&f.selectionStart!=null)sel=[f.selectionStart,f.selectionEnd]}catch(_){}
+  const rest=()=>{for(const k in vals){const e=document.getElementById(k);if(e)e.value=vals[k]}for(const k in chk){const e=document.getElementById(k);if(e)e.checked=chk[k]}
+    const d=el.querySelector(".days");if(d)d.scrollLeft=dsl;
+    if(fid){const e=document.getElementById(fid);if(e){e.focus({preventScroll:true});try{if(sel)e.setSelectionRange(sel[0],sel[1])}catch(_){}}}};
+  const tt=toast?`<div class="toast">${esc(toast)}</div>`:"";
+  if(!T||!S){el.innerHTML=login()+tt;rest();return}
+  const r=S.me.role,tabs=[["play","Play"],["quests","Quests"],["cal","Book"],["me","Me"],["board","Ranks"]];
+  if(r!=="player")tabs.push(["coach","Coach"]);if(r==="admin")tabs.push(["admin","Admin"]);
+  if(!tabs.some(t=>t[0]===tab))tab="play";
+  const body={play,quests,cal,me,board,coach,admin}[tab]();
+  el.innerHTML=`<div class="top"><b>${esc(S.me.username)}</b><span class="tag">${r.replace("_"," ")}</span></div>${S.me.defaultPw?`<div class="win err">Change the default admin password on the Me tab.</div>`:""}${body}
+  <nav class="tabs">${tabs.map(([k,n])=>`<button class="${k===tab?"on":""}" data-a="tab" data-v="${k}">${n}</button>`).join("")}</nav>${tt}`;
+  rest();
+  if(showQr&&tab==="admin"&&window.QRCode){const q=document.getElementById("qrbox");if(q&&!q.firstChild)new QRCode(q,{text:qrText,width:200,height:200})}
+}
+const pq=new URLSearchParams(location.search).get("ci");if(pq){sessionStorage.setItem("ci",pq);history.replaceState(null,"",location.pathname)}
+setInterval(()=>{if(T&&showQr&&tab==="admin"&&!document.hidden)refreshQr(true)},30000);
+if(T)load();else draw();
+let tick=0;setInterval(()=>{tick++;if(T&&!document.hidden&&navigator.onLine&&(tab==="play"||tick%3===0))load(true)},15000);
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&T)load(true)});
+document.addEventListener("keydown",e=>{if(e.key==="Enter"&&(!T||!S)&&(e.target.id==="u"||e.target.id==="p"))auth()});
+if("serviceWorker"in navigator)navigator.serviceWorker.register("sw.js");
+</script>
+</body>
+</html>
