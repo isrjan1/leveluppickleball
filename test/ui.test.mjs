@@ -117,3 +117,36 @@ test("admin check-in screen draws the QR code locally and a player can check in 
   assert.equal((await c.ok("state", {}, p)).checked, true);
   app.close();
 });
+
+test("first-time player sees the getting-started guide with the next step highlighted", async () => {
+  const c = await fresh({ ADMIN_PASSWORD: "x-admin-pw" });
+  const app = await openApp(c);
+  app.click("[data-a=mode]");
+  app.$("#u").value = "rookie"; app.$("#p").value = "secret123";
+  app.click("[data-a=auth]");
+  await until(() => app.$("[data-a=sv]"), "survey");
+  app.click("[data-a=sv]");
+  await until(() => app.text().includes("Getting started"), "guide");
+  assert.match(app.$(".steps li.now").textContent, /Check in/);
+  assert.match(app.text(), /NR means not rated yet/);
+  app.click("[data-a=hideGuide]");
+  await until(() => !app.text().includes("Getting started"), "guide hidden");
+  app.close();
+});
+
+test("scores are entered from your own team's point of view, whichever side you're on", async () => {
+  const c = await fresh({ ADMIN_PASSWORD: "x-admin-pw" });
+  const ts = [];
+  for (const n of ["lefty", "lefta", "righty", "righta"]) { ts.push(await c.player(n, "198.51.100." + (20 + ts.length))); await c.ok("join", {}, ts.at(-1)); }
+  const sides = await Promise.all(ts.map(async t => (await c.ok("state", {}, t)).match.side));
+  const rightTok = ts[sides.indexOf(1)], leftTok = ts[sides.indexOf(0)];
+  const { advance, MIN } = await import("./helpers/harness.mjs"); advance(6 * MIN);
+  const app = await openApp(c, { token: rightTok });
+  await until(() => app.$("#sa"), "score inputs");
+  app.$("#sa").value = "11"; app.$("#sb").value = "6"; // "we won 11-6" typed by a right-side player
+  app.click("[data-a=score]");
+  await until(() => app.text().includes("You confirmed your team won 11-6"), "own-perspective confirmation");
+  const left = await c.ok("state", {}, leftTok);
+  assert.deepEqual(left.match.agreed, [6, 11], "stored left-team-first: left side lost 6-11");
+  app.close();
+});

@@ -1,7 +1,7 @@
 {
   "name": "the-system",
   "private": true,
-  "version": "7.2.0",
+  "version": "8.0.0",
   "engines": {
     "node": ">=18"
   },
