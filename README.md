@@ -37,3 +37,11 @@ v8.1 (friends, chat, hosted open play):
 - Game type: a host picks Casual (never changes ratings) or Ranked (needs 8+ paid players; when the host ends the session every game counts toward ratings and XP, in play order, exactly once). Hosts can add a court (up to 10) or add 1 game for every player (up to 20) at any time.
 - Data: friends under fr/<id>, chats under c/<idA>_<idB>, open plays in one "op" list. All writes use the same compare-and-swap helper as the rest of the API. test/social.test.mjs covers the new flows.
 v8.1 Home: the Home tab no longer has the location check-in or the ranked queue buttons. It shows your rating, your open plays and the ones starting soon (with Host an open play), unread messages and friend requests, upcoming bookings and your last result. A ranked match that was already running still shows its score flow. Ratings now come from ranked open plays.
+
+v8.2: Open Play tab is grouped into Upcoming (by date and time), Cancelled and Ended. Every player now has a personal match history across all open plays, casual and ranked: when a host ends a session each finished game is written to every player's own log (mh/<id>, last 500). Ranked games also show their rating change; casual ones show a Casual tag.
+
+v8.3 (clubs):
+- Any player or coach can create a club (3-30 characters, unique name, up to 5 owned per person) and join as many clubs as they like (300 members per club). Owners can remove players or delete the club (only when it has no open plays running); admins can do the same. The owner can't leave their own club.
+- Every open play belongs to a club: the host must pick one of their own clubs when publishing, and the club shows on the open play and on the club page. Open plays created before v8.3 have no club and keep working.
+- Players tab now has Players and Clubs side by side. The Clubs view has the club ranking, ordered by the average rating of each club's rated players (NR players are counted as members but not in the average; a player in several clubs counts in each). Tap a club for its players, open plays, and join/leave. Profiles and the Me tab list a player's clubs.
+- Data: one "cl" list (clubs with members); open plays store club and cn (club name). API actions: clubs, clubGet, clubCreate, clubJoin, clubLeave, clubKick, clubDelete. test/clubs.test.mjs covers them.

@@ -8,7 +8,8 @@ async function setup() {
   const c = await fresh({ ADMIN_PASSWORD: "x-admin-pw" }), T = {}, ID = {};
   for (const [i, n] of NAMES.entries()) { T[n] = await c.player(n, "198.51.100." + (i + 10)); ID[n] = (await c.call("state", {}, T[n], "198.51.100.99")).body.me.id; }
   const call = (a, b, who) => c.call(a, b, T[who], "198.51.100.99");
-  return { c, T, ID, call };
+  const club = (await call("clubCreate", { name: "Test Club" }, "hosty")).body.club.id; // every open play belongs to a club
+  return { c, T, ID, call, club };
 }
 
 test("friend requests, accept, remove, and chat only between friends", async () => {
@@ -37,8 +38,8 @@ test("two requests crossing become a friendship", async () => {
 });
 
 test("open play: join, pay, shuffled queue, scores, ranking", async () => {
-  const { ID, call } = await setup();
-  const mk = { title: "Sat open play", loc: "Riverside Courts", ts: Date.now() + 36e5, price: 100, pay: "GCash 0917", cap: 12, courts: 2, rounds: 3 };
+  const { ID, call, club } = await setup();
+  const mk = { club, title: "Sat open play", loc: "Riverside Courts", ts: Date.now() + 36e5, price: 100, pay: "GCash 0917", cap: 12, courts: 2, rounds: 3 };
   assert.equal((await call("opCreate", { ...mk, pay: "" }, "hosty")).status, 400, "paid sessions need payment details");
   const id = (await call("opCreate", mk, "hosty")).body.od.id;
   assert.equal((await call("opStart", { id }, "hosty")).status, 400, "needs 4 paid players");
@@ -66,8 +67,8 @@ test("open play: join, pay, shuffled queue, scores, ranking", async () => {
 });
 
 test("host can add a court and more games; ranked sessions change ratings only when ended, casual never", async () => {
-  const { ID, call } = await setup();
-  const mk = { loc: "Riverside Courts", ts: Date.now() + 36e5, price: 0, cap: 20, courts: 1, rounds: 1 };
+  const { ID, call, club } = await setup();
+  const mk = { club, loc: "Riverside Courts", ts: Date.now() + 36e5, price: 0, cap: 20, courts: 1, rounds: 1 };
   const run = async (mode, title) => {
     const id = (await call("opCreate", { ...mk, title, mode }, "hosty")).body.od.id;
     for (const n of NAMES.slice(1)) await call("opJoin", { id }, n); // free: everyone is in
@@ -96,10 +97,10 @@ test("host can add a court and more games; ranked sessions change ratings only w
 });
 
 test("ranked open play: ratings update once, when the host ends it", async () => {
-  const { c, T, call } = await setup();
+  const { c, T, call, club } = await setup();
   T.gus = await c.player("gus", "198.51.100.77");
   const all = [...NAMES, "gus"];
-  const id = (await call("opCreate", { title: "Ranked night", loc: "Riverside Courts", ts: Date.now() + 36e5, price: 0, cap: 20, courts: 2, rounds: 2, mode: "ranked" }, "hosty")).body.od.id;
+  const id = (await call("opCreate", { club, title: "Ranked night", loc: "Riverside Courts", ts: Date.now() + 36e5, price: 0, cap: 20, courts: 2, rounds: 2, mode: "ranked" }, "hosty")).body.od.id;
   for (const n of all.slice(1)) await call("opJoin", { id }, n);
   let od = (await call("opStart", { id }, "hosty")).body.od;
   assert.equal(od.st, "live");
@@ -115,4 +116,29 @@ test("ranked open play: ratings update once, when the host ends it", async () =>
   const total = (await Promise.all(all.map(hist))).reduce((t, x) => t + x, 0);
   assert.equal(total, r.body.od.finished * 4, "every finished game counted for all four players");
   assert.equal((await call("opEnd", { id }, "hosty")).status, 400, "can't end twice, so ratings can't be applied twice");
+});
+
+test("every player keeps a personal match history across all open plays, casual and ranked", async () => {
+  const { ID, call, club } = await setup();
+  const play = async (title, mode, who) => {
+    const id = (await call("opCreate", { club, title, loc: "Riverside Courts", ts: Date.now() + 36e5, price: 0, cap: 20, courts: 1, rounds: 1, mode }, "hosty")).body.od.id;
+    for (const n of who) await call("opJoin", { id }, n);
+    await call("opStart", { id }, "hosty");
+    for (let i = 0; i < 20; i++) {
+      const od = (await call("opGet", { id }, "hosty")).body.od, g = od.g.find(x => x.st === "p"); if (!g) break;
+      await call("opScore", { id, gid: g.id, a: 11, b: 6 }, "hosty");
+    }
+    return id;
+  };
+  const first = await play("Casual morning", "casual", ["ann", "bob", "cyd"]);
+  assert.equal((await call("profile", { id: ID.ann }, "ann")).body.profile.hist.length, 0, "nothing is logged while the session runs");
+  await call("opEnd", { id: first }, "hosty");
+  const second = await play("Casual evening", "casual", ["ann", "bob", "cyd"]);
+  await call("opEnd", { id: second }, "hosty");
+  await call("opEnd", { id: second }, "hosty"); // ending twice must not log twice
+  const h = (await call("profile", { id: ID.ann }, "bob")).body.profile.hist;
+  assert.equal(h.length, 2, "one game in each open play");
+  assert.deepEqual(h.map(x => x.ot).sort(), ["Casual evening", "Casual morning"]);
+  assert.ok(h.every(x => x.k === "casual" && x.d == null && x.pt && x.op.length === 2));
+  assert.equal((await call("profile", { id: ID.hosty }, "ann")).body.profile.hist.length, 2, "the host's games count too");
 });

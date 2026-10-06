@@ -350,11 +350,11 @@ function opRank(e) {
   return [...m.values()].filter(r => r.g || e.pl.some(x => x.id === r.id && x.paid && !x.left))
     .sort((a, b) => b.w - a.w || (b.pf - b.pa) - (a.pf - a.pa) || b.pf - a.pf || a.n.localeCompare(b.n));
 }
-const opLine = (e, me) => ({ id: e.id, mode: e.mode || "casual", title: e.title, loc: e.loc, ts: e.ts, dur: e.dur, price: e.price, cap: e.cap, n: e.pl.filter(x => !x.left).length, st: e.status, hn: e.hn,
+const opLine = (e, me) => ({ id: e.id, club: e.club || null, cn: e.cn || "", mode: e.mode || "casual", title: e.title, loc: e.loc, ts: e.ts, dur: e.dur, price: e.price, cap: e.cap, n: e.pl.filter(x => !x.left).length, st: e.status, hn: e.hn,
   mine: e.host === me.id, joined: e.pl.some(x => x.id === me.id && !x.left), paid: e.pl.some(x => x.id === me.id && x.paid && !x.left) });
 function opDetail(e, me) {
   const host = e.host === me.id, joined = e.pl.some(x => x.id === me.id && !x.left), done = e.g.filter(g => g.st === "d");
-  return { id: e.id, mode: e.mode || "casual", applied: !!e.applied, title: e.title, desc: e.desc, loc: e.loc, ts: e.ts, dur: e.dur, price: e.price, pay: host || joined ? e.pay : "", cap: e.cap, courts: e.courts, rounds: e.rounds,
+  return { id: e.id, club: e.club || null, cn: e.cn || "", mode: e.mode || "casual", applied: !!e.applied, title: e.title, desc: e.desc, loc: e.loc, ts: e.ts, dur: e.dur, price: e.price, pay: host || joined ? e.pay : "", cap: e.cap, courts: e.courts, rounds: e.rounds,
     st: e.status, host: e.host, hn: e.hn, isHost: host, joined, now: Date.now(),
     pl: e.pl.filter(x => !x.left || e.g.some(g => g.p.includes(x.id))).map(x => ({ id: x.id, n: x.n, paid: !!x.paid, left: !!x.left, me: x.id === me.id, ref: host || x.id === me.id ? x.ref || "" : "" })),
     g: [...e.g.filter(g => g.st !== "d"), ...done.slice(-30)].map(g => ({ id: g.id, n: g.n, p: g.p, c: g.court, st: g.st, sa: g.sa, sb: g.sb })),
@@ -382,24 +382,76 @@ async function board(s, force) {
   await s.setJSON("board", { v: 2, t: Date.now(), rows });
   return rows;
 }
+// Personal match log: one list per player under mh/<id>, written when an open play ends (casual and ranked alike),
+// so a player's history follows them across every open play. Rating changes of ranked games are joined in from u.hist when read.
+const MHMAX = 500;
+async function logGames(s, e) {
+  const per = new Map();
+  for (const g of e.g) {
+    if (g.st !== "d" || g.p.length < 4) continue;
+    const t = g.t1 || e.ended || Date.now();
+    [[0, 1, 2, 3, g.sa, g.sb], [1, 0, 2, 3, g.sa, g.sb], [2, 3, 0, 1, g.sb, g.sa], [3, 2, 0, 1, g.sb, g.sa]].forEach(([me, pt, o1, o2, my, th]) =>
+      (per.get(g.p[me]) || per.set(g.p[me], []).get(g.p[me])).push({ t, o: e.id, ot: e.title, k: e.mode || "casual", g: g.id, pt: g.p[pt], op: [g.p[o1], g.p[o2]], s: [my, th], w: my > th }));
+  }
+  await Promise.all([...per].map(([id, rows]) => mutate(s, "mh/" + id, [], list => {
+    const have = new Set(list.map(x => x.g)), add = rows.filter(r => !have.has(r.g));
+    if (!add.length) return SKIP;
+    list.push(...add); list.sort((a, b) => a.t - b.t);
+    if (list.length > MHMAX) list.splice(0, list.length - MHMAX);
+  }).catch(x => console.error("match log", x))));
+}
+// Everything a player has played, newest first: the personal log plus older rated matches that predate it.
+async function history(s, u, max = 50) {
+  const log = await jget(s, "mh/" + u.id, []), by = new Map((u.hist || []).map(h => [h.m, h]));
+  const rows = log.map(x => { const h = x.k === "ranked" ? by.get(x.g) : null; return { ...x, d: h ? h.d : undefined, nr: h ? !!h.nr : false, ex: h ? h.ex : undefined }; });
+  const seen = new Set(log.map(x => x.g));
+  (u.hist || []).filter(h => !seen.has(h.m)).forEach(h => rows.push({ t: h.t, k: "ranked", pt: h.pt, op: h.op, s: h.s, w: h.w, d: h.d, nr: !!h.nr, ex: h.ex }));
+  return rows.sort((a, b) => b.t - a.t).slice(0, max);
+}
 // Public profile: what any club member can see about another player.
 async function profile(s, id, self) {
   const u = await getU(s, id);
   if (!u || (!self && (u.disabled || u.role === "admin"))) return null;
-  const ids = [...new Set(u.hist.slice(-15).flatMap(h => [h.pt, ...h.op]))];
+  const cls = (await jget(s, "cl", [])).filter(c => isMember(c, u.id)).map(clubRef);
+  const hs = await history(s, u), ids = [...new Set(hs.flatMap(h => [h.pt, ...h.op]))];
   const names = new Map(await Promise.all(ids.map(async i => [i, (await getU(s, i))?.username || "Former player"])));
   return { id: u.id, n: u.username, r: rated(u) ? u.r : null, pr: rated(u) ? null : rtg(u), ip: u.ip || 0, rel: reliability(u), w: u.w | 0, l: u.l | 0,
     t: tierOf(u), badges: u.badges, coach: u.role === "certified_coach", src: u.src || null, since: u.created, sk: u.sk || null, xp: u.xp,
-    hist: u.hist.slice(-15).reverse().map(h => ({ t: h.t, s: h.s, d: h.d, w: h.w, nr: !!h.nr, ex: h.ex, pt: names.get(h.pt), op: h.op.map(i => names.get(i)) })) };
+    clubs: cls,
+    hist: hs.map(h => ({ t: h.t, s: h.s, d: h.d, w: h.w, nr: !!h.nr, ex: h.ex, k: h.k, ot: h.ot, pt: names.get(h.pt), op: h.op.map(i => names.get(i)) })) };
 }
 async function coaches(s, force) {
   let c = force ? null : await jget(s, "coaches", null);
   if (!c) { c = (await loadAll(s)).filter(u => u.role === "certified_coach" && !u.disabled).map(u => ({ id: u.id, n: u.username, pay: u.pay || "" })); await s.setJSON("coaches", c); }
   return c;
 }
+// ---- Clubs ----
+// One list "cl": {id, name, desc, owner, on (owner name), made, m: [{id, at}]}. Any player or coach can create clubs and join several.
+// Every open play belongs to one of the host's clubs. Club ranking = average club rating of the members who have one (NR players don't count).
+const CLNAME = /^[A-Za-z0-9 _.&'-]{3,30}$/;
+const isMember = (c, id) => c.m.some(x => x.id === id);
+const clubRef = c => ({ id: c.id, n: c.name });
+function clubStats(c, rows) {
+  const by = new Map(rows.map(r => [r.id, r])), act = c.m.map(x => by.get(x.id)).filter(Boolean), rated = act.filter(r => r.r != null);
+  return { act, n: act.length, rn: rated.length, avg: rated.length ? r3(rated.reduce((t, r) => t + r.r, 0) / rated.length) : null };
+}
+async function clubBoard(s, me) {
+  const [cl, rows] = await Promise.all([jget(s, "cl", []), board(s)]);
+  return cl.map(c => { const st = clubStats(c, rows); return { id: c.id, n: c.name, d: c.desc, on: c.on, m: st.n, rm: st.rn, avg: st.avg, joined: isMember(c, me.id), mine: c.owner === me.id }; })
+    .sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1) || b.m - a.m || a.n.localeCompare(b.n));
+}
+async function clubDetail(s, me, id) {
+  const [cl, rows, ops] = await Promise.all([jget(s, "cl", []), board(s), jget(s, "op", [])]);
+  const c = cl.find(x => x.id === id);
+  if (!c) throw new Bad("Club not found", 404);
+  const st = clubStats(c, rows);
+  return { id: c.id, n: c.name, d: c.desc, on: c.on, owner: c.owner, isOwner: c.owner === me.id, joined: isMember(c, me.id), made: c.made, m: st.n, rm: st.rn, avg: st.avg,
+    mem: st.act.map(r => ({ id: r.id, n: r.n, r: r.r, rel: r.rel, w: r.w, l: r.l, c: !!r.c, o: r.id === c.owner })).sort((a, b) => (b.r ?? -1) - (a.r ?? -1) || a.n.localeCompare(b.n)),
+    ops: ops.filter(e => e.club === id && OPLIVE(e)).sort((a, b) => a.ts - b.ts).map(e => opLine(e, me)) };
+}
 async function snapshot(s, me, cfg, full) {
   const names = new Map(), nm = id => { if (!names.has(id)) names.set(id, getU(s, id).then(u => u?.username || "?")); return names.get(id); };
-  const [ms, q, bk, hw, co, bd, ss, fr, ops] = await Promise.all([jget(s, "m", []), jget(s, "q", []), jget(s, "bk", []), jget(s, "hw", []), coaches(s), board(s), jget(s, "ss", []), frOf(s, me.id), jget(s, "op", [])]);
+  const [ms, q, bk, hw, co, bd, ss, fr, ops, cls] = await Promise.all([jget(s, "m", []), jget(s, "q", []), jget(s, "bk", []), jget(s, "hw", []), coaches(s), board(s), jget(s, "ss", []), frOf(s, me.id), jget(s, "op", []), jget(s, "cl", [])]);
   const qf = q.filter(fresh), live = bk.filter(b => b.status !== "cancelled"), sm = new Map(ss.map(x => [x.id, x])), cn = new Map(co.map(c => [c.id, c.n])), cp = new Map(co.map(c => [c.id, c.pay]));
   const mm = ms.filter(m => m.p.includes(me.id) && m.status !== "done" && Date.now() - m.start < 3 * 36e5).pop();
   const out = {
@@ -429,6 +481,7 @@ async function snapshot(s, me, cfg, full) {
     homework: await Promise.all(hw.filter(h => h.student === me.id).slice(-15).map(async h => ({ ...h, cn: await nm(h.coach) }))),
     board: bd.filter(u => u.r != null).slice(0, 25).map(u => ({ ...u, me: u.id === me.id })),
     friends: { f: fr.f.slice().sort((a, b) => (b.lm | 0) - (a.lm | 0) || a.n.localeCompare(b.n)), i: fr.i, o: fr.o }, unread: fr.f.reduce((t, x) => t + (x.un | 0), 0),
+    myClubs: cls.filter(c => isMember(c, me.id)).map(c => ({ ...clubRef(c), o: c.owner === me.id })),
     ops: ops.filter(e => OPLIVE(e) || (OPRECENT(e) && e.pl.some(x => x.id === me.id))).sort((a, b) => (b.status === "live") - (a.status === "live") || a.ts - b.ts).slice(0, 40).map(e => opLine(e, me)),
   };
   if (me.role !== "player") {
@@ -690,6 +743,64 @@ async function handle(req, context) {
     return thread(s, me, id);
   }
 
+  // ---- Clubs
+  if (a === "clubs") return J({ clubs: await clubBoard(s, me) });
+  if (a.startsWith("club")) {
+    const id = String(b.id || "");
+    if (a === "clubCreate") {
+      const name = String(b.name || "").trim().replace(/\s+/g, " "), desc = String(b.desc || "").trim().slice(0, 200);
+      if (!CLNAME.test(name)) return E("Club names are 3-30 characters: letters, numbers, spaces and . _ & ' -");
+      let made;
+      await mutate(s, "cl", [], list => {
+        if (list.length >= 500) throw new Bad("Too many clubs right now. Try again later.");
+        if (list.some(c => c.name.toLowerCase() === name.toLowerCase())) throw new Bad("That club name is taken", 409);
+        if (list.filter(c => c.owner === me.id).length >= 5) throw new Bad("You can own up to 5 clubs");
+        list.push(made = { id: uid(), name, desc, owner: me.id, on: me.username, made: Date.now(), m: [{ id: me.id, at: Date.now() }] });
+      });
+      return ok(`Club "${name}" created`, { club: await clubDetail(s, me, made.id) });
+    }
+    if (!ID.test(id)) return E("invalid");
+    if (a === "clubGet") return J({ club: await clubDetail(s, me, id) });
+    let msg = "";
+    if (a === "clubJoin") {
+      await mutate(s, "cl", [], list => {
+        const c = list.find(x => x.id === id);
+        if (!c) throw new Bad("Club not found", 404);
+        if (isMember(c, me.id)) throw new Bad("You're already in this club");
+        if (c.m.length >= 300) throw new Bad("This club is full");
+        c.m.push({ id: me.id, at: Date.now() });
+      });
+      msg = "You joined the club";
+    } else if (a === "clubLeave") {
+      await mutate(s, "cl", [], list => {
+        const c = list.find(x => x.id === id);
+        if (!c || !isMember(c, me.id)) throw new Bad("You're not in this club");
+        if (c.owner === me.id) throw new Bad("The owner can't leave. Delete the club instead.");
+        c.m = c.m.filter(x => x.id !== me.id);
+      });
+      msg = "You left the club";
+    } else if (a === "clubKick") {
+      const pid = String(b.pid || "");
+      await mutate(s, "cl", [], list => {
+        const c = list.find(x => x.id === id);
+        if (!c) throw new Bad("Club not found", 404);
+        if (c.owner !== me.id && !admin) throw new Bad("Only the club owner can do that", 403);
+        if (pid === c.owner || !isMember(c, pid)) throw new Bad("That player can't be removed");
+        c.m = c.m.filter(x => x.id !== pid);
+      });
+      msg = "Player removed from the club";
+    } else if (a === "clubDelete") {
+      if ((await jget(s, "op", [])).some(e => e.club === id && OPLIVE(e))) return E("This club still has open plays running. End or cancel them first.");
+      await mutate(s, "cl", [], list => {
+        const i = list.findIndex(x => x.id === id);
+        if (i < 0) throw new Bad("Club not found", 404);
+        if (list[i].owner !== me.id && !admin) throw new Bad("Only the club owner can do that", 403);
+        list.splice(i, 1);
+      });
+      return ok("Club deleted");
+    } else return E("unknown action");
+    return ok(msg, { club: await clubDetail(s, me, id) });
+  }
   // ---- Hosted open play
   if (a === "opCreate") {
     const title = String(b.title || "").trim().slice(0, 60), loc = String(b.loc || "").trim().slice(0, 100), desc = String(b.desc || "").trim().slice(0, 300), pay = String(b.pay || "").trim().slice(0, 120);
@@ -699,12 +810,17 @@ async function handle(req, context) {
     if (!(ts > Date.now() - 36e5 && ts < Date.now() + 60 * 864e5)) return E("Pick a start time within the next 60 days");
     if (!(price >= 0 && price <= 1e6)) return E("Check the price");
     if (price && pay.length < 3) return E("Add your GCash or e-wallet details so players know where to pay");
+    const club = String(b.club || "");
+    if (!ID.test(club)) return E("Pick the club this open play is for");
+    const cl = (await jget(s, "cl", [])).find(c => c.id === club);
+    if (!cl) return E("Club not found", 404);
+    if (!isMember(cl, me.id)) return E("Join this club before hosting an open play for it", 403);
     let made;
     await mutate(s, "op", [], list => {
       for (let i = list.length; i--;) if (!OPLIVE(list[i]) && !OPRECENT(list[i])) list.splice(i, 1); // housekeeping
       if (list.filter(e => e.host === me.id && OPLIVE(e)).length >= 5) throw new Bad("You already have 5 open plays running");
       if (list.length >= 300) throw new Bad("Too many open plays right now. Try again later.");
-      list.push(made = { id: uid(), host: me.id, hn: me.username, mode, title, desc, loc, ts, dur, price, pay, cap, courts, rounds, status: "open", made: Date.now(), seq: 0,
+      list.push(made = { id: uid(), host: me.id, hn: me.username, club: cl.id, cn: cl.name, mode, title, desc, loc, ts, dur, price, pay, cap, courts, rounds, status: "open", made: Date.now(), seq: 0,
         pl: [{ id: me.id, n: me.username, j: Date.now(), paid: true }], g: [] }); // the host plays too and doesn't pay themselves
     });
     return ok("Open play published", { od: opDetail(made, me) });
@@ -713,7 +829,7 @@ async function handle(req, context) {
     const id = String(b.id || ""), pid = String(b.pid || "");
     if (!ID.test(id)) return E("invalid");
     const hostOnly = e => { if (e.host !== me.id) throw new Bad("Only the host can do that", 403); };
-    let msg = "", e, rate = null;
+    let msg = "", e, rate = null, logIt = false;
     if (a === "opGet") {
       e = (await jget(s, "op", [])).find(x => x.id === id);
       if (!e) return E("Open play not found", 404);
@@ -820,7 +936,9 @@ async function handle(req, context) {
         e.g = e.g.filter(g => g.st === "d"); e.status = "ended"; e.ended = Date.now();
         rate = e.mode === "ranked" && !e.applied ? e.g.map(g => ({ id: g.id, p: g.p.slice(), sa: g.sa, sb: g.sb })) : null; // ratings are applied exactly once
         if (rate) e.applied = true;
+        if (!e.logged) { e.logged = true; logIt = true; }
       });
+      if (logIt) await logGames(s, e);
       msg = "Open play ended. Final ranking saved.";
       if (rate) { // ranked: every game now counts toward the club rating, in the order it was played
         for (const g of rate) await applyPlan(s, await planFinish(s, { id: g.id, p: g.p, sub: {}, status: "playing" }, g.sa, g.sb, [], cfg.tz), true).catch(x => console.error("ranked open play", x));
