@@ -64,3 +64,55 @@ test("open play: join, pay, shuffled queue, scores, ranking", async () => {
   assert.equal(od.rank.reduce((t, r) => t + r.g, 0), od.finished * 4);
   assert.equal((await call("opEnd", { id }, "hosty")).body.od.st, "ended");
 });
+
+test("host can add a court and more games; ranked sessions change ratings only when ended, casual never", async () => {
+  const { ID, call } = await setup();
+  const mk = { loc: "Riverside Courts", ts: Date.now() + 36e5, price: 0, cap: 20, courts: 1, rounds: 1 };
+  const run = async (mode, title) => {
+    const id = (await call("opCreate", { ...mk, title, mode }, "hosty")).body.od.id;
+    for (const n of NAMES.slice(1)) await call("opJoin", { id }, n); // free: everyone is in
+    return id;
+  };
+  const rid = await run("ranked", "Ranked night");
+  assert.equal((await call("opGet", { id: rid }, "ann")).body.od.mode, "ranked");
+  assert.equal((await call("opStart", { id: rid }, "hosty")).status, 400, "ranked needs 8 paid players");
+  const cid = await run("casual", "Casual night");
+  let od = (await call("opStart", { id: cid }, "hosty")).body.od;
+  assert.equal(od.g.filter(g => g.st === "p").length, 1, "one court");
+  od = (await call("opCourt", { id: cid }, "hosty")).body.od;
+  assert.equal(od.courts, 2);
+  assert.equal((await call("opCourt", { id: cid }, "ann")).status, 403, "only the host adds courts");
+  const before = od.g.length;
+  od = (await call("opMore", { id: cid }, "hosty")).body.od;
+  assert.equal(od.rounds, 2); assert.ok(od.g.length > before, "more games queued");
+  for (let i = 0; i < 60; i++) {
+    od = (await call("opGet", { id: cid }, "hosty")).body.od;
+    const g = od.g.find(x => x.st === "p"); if (!g) break;
+    await call("opScore", { id: cid, gid: g.id, a: 11, b: 4 }, "hosty");
+  }
+  await call("opEnd", { id: cid }, "hosty");
+  assert.equal((await call("state", {}, "ann")).body.me.pr, 3.5, "casual leaves the rating untouched");
+  assert.equal((await call("state", {}, "ann")).body.me.hist.length, 0);
+});
+
+test("ranked open play: ratings update once, when the host ends it", async () => {
+  const { c, T, call } = await setup();
+  T.gus = await c.player("gus", "198.51.100.77");
+  const all = [...NAMES, "gus"];
+  const id = (await call("opCreate", { title: "Ranked night", loc: "Riverside Courts", ts: Date.now() + 36e5, price: 0, cap: 20, courts: 2, rounds: 2, mode: "ranked" }, "hosty")).body.od.id;
+  for (const n of all.slice(1)) await call("opJoin", { id }, n);
+  let od = (await call("opStart", { id }, "hosty")).body.od;
+  assert.equal(od.st, "live");
+  for (let i = 0; i < 60; i++) {
+    od = (await call("opGet", { id }, "hosty")).body.od;
+    const g = od.g.find(x => x.st === "p"); if (!g) break;
+    await call("opScore", { id, gid: g.id, a: 11, b: 5 }, "hosty");
+  }
+  const hist = async n => (await call("state", {}, n)).body.me.hist.length;
+  for (const n of all) assert.equal(await hist(n), 0, "no rating change while the session is running");
+  const r = await call("opEnd", { id }, "hosty");
+  assert.equal(r.body.od.applied, true);
+  const total = (await Promise.all(all.map(hist))).reduce((t, x) => t + x, 0);
+  assert.equal(total, r.body.od.finished * 4, "every finished game counted for all four players");
+  assert.equal((await call("opEnd", { id }, "hosty")).status, 400, "can't end twice, so ratings can't be applied twice");
+});

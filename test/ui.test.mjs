@@ -127,7 +127,7 @@ test("first-time player sees the getting-started guide with the next step highli
   await until(() => app.$("[data-a=sv]"), "survey");
   app.click("[data-a=sv]");
   await until(() => app.text().includes("Getting started"), "guide");
-  assert.match(app.$(".steps li.now").textContent, /Check in/);
+  assert.match(app.$(".steps li.now").textContent, /Join an open play/);
   assert.match(app.text(), /NR means not rated yet/);
   app.click("[data-a=hideGuide]");
   await until(() => !app.text().includes("Getting started"), "guide hidden");

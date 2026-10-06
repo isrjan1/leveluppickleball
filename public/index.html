@@ -283,18 +283,18 @@ const A={
   fAdd:x=>run("fAdd",{id:x}),fAccept:x=>run("fAccept",{id:x}),
   fRemove:x=>{const f=[...S.friends.f,...S.friends.i,...S.friends.o].find(z=>z.id===x);ask(S.friends.f.some(z=>z.id===x)?`Remove ${f?f.n:"this friend"}? Your chat history with them is deleted.`:"Remove this request?")&&run("fRemove",{id:x}).then(()=>{if(cv===x){cv=null;draw()}})},
   chat:x=>{tab="friends";cv=x;view=null;ov=null;draw();scrollTo(0,0);chatLoad(x)},send:()=>sendMsg(),
-  hf:()=>{hostForm=!hostForm;draw()},
+  hf:()=>{hostForm=!hostForm;draw()},hostNow:()=>{hostForm=true;A.tab("open")},
   ov:x=>{ov=x;cv=null;view=null;draw();scrollTo(0,0);opLoad(x)},
-  opCreate:()=>{const w=v("o_w");run("opCreate",{title:v("o_t"),loc:v("o_l"),desc:v("o_d"),ts:w?new Date(w).getTime():0,dur:+v("o_m"),price:+v("o_p"),cap:+v("o_c"),courts:+v("o_n"),rounds:+v("o_r"),pay:v("o_y")}).then(()=>{if(!toastBad&&lastOd){hostForm=false;ov=lastOd;draw();scrollTo(0,0)}})},
+  opCreate:()=>{const w=v("o_w");run("opCreate",{title:v("o_t"),loc:v("o_l"),desc:v("o_d"),ts:w?new Date(w).getTime():0,dur:+v("o_m"),price:+v("o_p"),cap:+v("o_c"),courts:+v("o_n"),rounds:+v("o_r"),pay:v("o_y"),mode:v("o_k")}).then(()=>{if(!toastBad&&lastOd){hostForm=false;ov=lastOd;draw();scrollTo(0,0)}})},
   opJoin:x=>run("opJoin",{id:x}),opLeave:x=>ask("Leave this open play? If you already paid, ask the host for a refund.")&&run("opLeave",{id:x}),
   opRef:x=>run("opRef",{id:x,ref:v("or"+x)}),
   opPaid:x=>run("opPaid",{id:ov,pid:x}),
   opKick:x=>{const p=((OD[ov]||{}).pl||[]).find(z=>z.id===x);ask(`Remove ${p?p.n:"this player"} from the open play?`)&&run("opKick",{id:ov,pid:x})},
-  opStart:x=>run("opStart",{id:x}),
+  opStart:x=>run("opStart",{id:x}),opCourt:x=>run("opCourt",{id:x}),opMore:x=>run("opMore",{id:x}),
   opShuffle:x=>ask("Re-randomize the games still waiting in the queue? Finished games and games on court are kept.")&&run("opShuffle",{id:x}),
   opScore:x=>{const a=v("gsa"+x),b=v("gsb"+x);if(a===""||b===""||+a===+b||+a<0||+b<0||+a>40||+b>40){say("Enter both scores. One team must have won.",1);return draw()}run("opScore",{id:ov,gid:x,a:+a,b:+b})},
   opVoid:x=>ask("Take this game off the court? The queue is topped up.")&&run("opVoid",{id:ov,gid:x}),
-  opEnd:x=>ask("End this open play? The final ranking is saved and the waiting games are cleared.")&&run("opEnd",{id:x}),
+  opEnd:x=>ask("End this open play? The final ranking is saved and the waiting games are cleared."+((OD[ov]||{}).mode==="ranked"?" Ranked games will now change player ratings.":""))&&run("opEnd",{id:x}),
   opCancel:x=>ask("Cancel this open play? Refund anyone who already paid.")&&run("opCancel",{id:x}),
   sv:()=>run("survey",{v:[0,1,2,3,4,5].map(i=>+v("sk"+i))}).then(ran=>{if(ran&&!toastBad)rtk=false;draw()}),svx:()=>{rtk=false;draw()},rt:()=>{rtk=true;draw()},
   checkin:()=>busy?0:S.qr?run("checkin",{code:v("fc")}):geo(),qrOn:async()=>{showQr=true;await refreshQr()},qrOff:()=>{showQr=false;draw()},join:()=>run("join"),leave:()=>run("leave"),
@@ -335,11 +335,11 @@ let sT;document.addEventListener("input",e=>{if(e.target.id==="sa"||e.target.id=
 
 const opts=(l,f)=>l.map(f).join("");
 const ask=m=>!busy&&confirm(m);
-function login(){return `<div class="welcome"><div class="hero">${COURT}<h1>Level <i>Up</i></h1><p>Your club rating, open play queue, coaching and bookings in one place.</p></div>
+function login(){return `<div class="welcome"><div class="hero">${COURT}<h1>Level <i>Up</i></h1><p>Your club rating, open play, friends, coaching and bookings in one place.</p></div>
 <div class="sheet"><h2>How it works</h2><ol class="steps">
-<li><b>Check in at the club</b> and join the open play queue.</li>
-<li><b>Play your game.</b> The app puts four players on a court.</li>
-<li><b>Confirm the score</b> and your rating updates.</li></ol></div>
+<li><b>Join an open play</b> and pay the host.</li>
+<li><b>Play your games.</b> The app sets the courts and the queue.</li>
+<li><b>Rank up.</b> Ranked sessions update your rating.</li></ol></div>
 <div class="sheet"><h2>${authMode==="reg"?"Create your player account":"Log in"}</h2>
 <input class="w100" id="u" placeholder="Username" autocapitalize="none" autocomplete="username"><input class="w100" id="p" type="password" placeholder="Password" autocomplete="${authMode==="reg"?"new-password":"current-password"}">
 <button class="btn big" data-a="auth">${authMode==="reg"?"Create account":"Log in"}</button>
@@ -358,35 +358,40 @@ function hero(p,{self,back}={}){
 }
 function histRows(h){
   if(!h)return`<p class="empty">Loading matches...</p>`;
-  if(!h.length)return`<p class="empty">No rated matches yet. Join the open play queue to get started.</p>`;
+  if(!h.length)return`<p class="empty">No rated matches yet. Join a ranked open play to get started.</p>`;
   return opts(h,x=>`<div class="row"><span class="wl${x.w?" w":""}" aria-label="${x.w?"Win":"Loss"}">${x.w?"W":"L"}</span><div class="g1"><span class="n">${x.s[0]}-${x.s[1]}</span> <span class="m">with ${esc(x.pt)} vs ${x.op.map(esc).join(" and ")}</span><div class="m">${day(x.t)}, expected ${expScore(x.ex??.5)}${x.nr?", provisional":""}</div></div><b class="${x.d>=0?"up":"down"}">${signed(x.d)}</b></div>`);
 }
 function teamBlock(names,rs,mine){return`<div class="team${mine?" mine":""}">${names.map((n,i)=>`<div class="pl">${av(n)}<div><b>${esc(n)}</b><span>${fmtR(rs?rs[i]:null)}</span></div></div>`).join("")}</div>`}
 
 function play(){
-  const m=S.match,q=S.queue,t=S.me.tier,nb=S.bookings.filter(b=>b.status==="booked"&&b.ts>Date.now()-36e5&&b.ts-Date.now()<864e5).sort((a,b)=>a.ts-b.ts)[0];
+  const m=S.match,nb=S.bookings.filter(b=>b.status==="booked"&&b.ts>Date.now()-36e5&&b.ts-Date.now()<864e5).sort((a,b)=>a.ts-b.ts)[0];
   let h=hero({...S.me,n:S.me.username,t:S.me.tier,coach:S.me.role==="certified_coach"},{self:1});
-  if(m){h+=matchCard(m);
-  }else{
-    h+=`<div class="sheet"><h2>Open play</h2><p class="sub">${S.checked?"You're checked in. Join the queue and you'll get a court when four players are ready.":"Check in when you're at the club, then join the queue."}</p>
-    ${S.checked?"":S.qr?`<input class="w100" id="fc" placeholder="Facility code" autocapitalize="characters"><button class="btn big" data-a="checkin">Check in</button><p class="m">Or scan the QR code at the front desk with your phone camera.</p>`:`<button class="btn big" data-a="checkin">Check in with my location</button>`}
-    ${S.checked?(S.inQueue?`<div class="note">In the queue for <b>${ago(S.qSince||Date.now())} min</b>. Your court appears here when four players are ready.</div><button class="btn w" data-a="leave">Leave queue</button>`:`<button class="btn big ball" data-a="join">Join the queue</button>`):""}
-    <p class="m">Players waiting: ${S.tiers.map((n,i)=>n+" "+q[i]).join(", ")}. You're in the <b>${S.tiers[t]}</b> group; a coach moves you up by signing off your skill badges.${S.inQueue?` If your group is short of players for ${Math.round((S.mixAfter||6e5)/6e4)} min, you may play the group above or below.`:""}</p></div>`;
-  }
-  h+=guide();
+  if(m)h+=matchCard(m); // a ranked match that was already running before open play sessions: keep its score flow
+  h+=homeOpen()+homeFriends()+guide();
   if(nb)h+=`<div class="sheet"><h2>Coming up</h2><p>${esc(nb.title)} with ${esc(nb.cn)}, ${when(nb.ts)}</p><p class="m">Check-in code <b>${nb.id}</b></p></div>`;
   if(S.me.last)h+=`<div class="sheet"><h2>Last result</h2><p class="delta">${esc(S.me.last)}</p></div>`;
   return h;
+}
+// Home: the open plays you're in first, then what's live or starting soon
+function homeOpen(){
+  const o=S.ops.filter(e=>e.st==="live"||e.st==="open").sort((a,b)=>((b.joined||b.mine)?1:0)-((a.joined||a.mine)?1:0)||(b.st==="live")-(a.st==="live")||a.ts-b.ts).slice(0,3);
+  return `<div class="sheet"><h2>Open play</h2><p class="sub">${o.length?"Join a session and pay the host. The app sets up the games and the queue.":"Nothing scheduled yet. Host one and invite your friends."}</p>${opts(o,opRow)}
+  <button class="btn" data-a="tab" data-v="open">${o.length?"See all open plays":"Find open plays"}</button><button class="btn ball" data-a="hostNow">Host an open play</button></div>`;
+}
+function homeFriends(){
+  const n=S.unread|0,r=S.friends.i.length;
+  if(!n&&!r)return"";
+  return `<div class="sheet"><h2>Friends</h2>${n?`<p><b>${n}</b> new message${n===1?"":"s"}</p>`:""}${r?`<p><b>${r}</b> friend request${r===1?"":"s"} waiting</p>`:""}<button class="btn" data-a="tab" data-v="friends">Open Friends</button></div>`;
 }
 // First-run checklist: the real order of things, ticked off from live state, gone once you have a rating.
 function guide(){
   const u=S.me,games=(u.hist||[]).length;
   if(u.role!=="player"||safeGet("gd"+u.id))return"";
   const st=[[!!u.sk,"Set your skill level","Gives you a starting estimate until you've played."],
-    [S.checked||S.inQueue||!!S.match,"Check in when you arrive at the club",S.qr?"Above, type the code shown on the front-desk screen, or scan its QR code with your phone camera.":"Tap the Check in button above while you're at the courts. It uses your phone's location."],
-    [S.inQueue||!!S.match||games>0,"Join the open play queue","Tap Join the queue above. You get a court as soon as four players are waiting."],
-    [games>0,"Play, then confirm the score","After the game, one player enters the final score and the others tap Confirm."],
-    [u.r!=null,"Get your official rating","After about three games against rated players, NR turns into your rating."]];
+    [S.ops.some(e=>e.joined||e.mine)||games>0,"Join an open play","Open the Open Play tab, pick a session and pay the host to get into the games."],
+    [games>0,"Play, then confirm the score","Ranked open plays count toward your rating when the host ends the session."],
+    [u.r!=null,"Get your official rating","After about three games against rated players, NR turns into your rating."],
+    [S.friends.f.length>0||S.friends.o.length>0,"Add a friend","Open the Friends tab and type their username to chat."]];
   if(st.every(x=>x[0]))return"";
   const now=st.findIndex(x=>!x[0]);
   return `<div class="sheet"><h2>Getting started</h2><ol class="steps">${st.map(([d,t,e],i)=>`<li class="${d?"done":i===now?"now":""}"><b>${t}</b>${i===now?`<span class="m">${e}</span>`:""}</li>`).join("")}</ol><button class="linkbtn" data-a="hideGuide">Hide this guide</button></div>`;
@@ -485,15 +490,16 @@ async function sendMsg(){
 const p2=n=>String(n).padStart(2,"0"),dtLocal=ms=>{const d=new Date(ms);return`${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}T${p2(d.getHours())}:${p2(d.getMinutes())}`};
 const br=t=>esc(t).replace(/\n/g,"<br>");
 const OPST={open:"Open",live:"Live",ended:"Ended",cancelled:"Cancelled"};
-function opRow(e){return`<div class="row">${av(e.title)}<div class="g1"><span class="n">${esc(e.title)}</span> <span class="tag">${e.mine?"Hosting":e.joined?(e.paid?"You're in":"Joined"):OPST[e.st]}${e.st==="live"&&(e.mine||e.joined)?", live":""}</span><div class="m">${esc(e.loc)}<br>${when(e.ts)}, ${money(e.price)}, ${e.n}/${e.cap} players, host ${esc(e.hn)}</div></div><button class="btn g" data-a="ov" data-v="${e.id}">Open</button></div>`}
+function opRow(e){return`<div class="row">${av(e.title)}<div class="g1"><span class="n">${esc(e.title)}</span> <span class="chip${e.mode==="ranked"?" on":""}">${e.mode==="ranked"?"Ranked":"Casual"}</span><span class="tag">${e.mine?"Hosting":e.joined?(e.paid?"You're in":"Joined"):OPST[e.st]}${e.st==="live"&&(e.mine||e.joined)?", live":""}</span><div class="m">${esc(e.loc)}<br>${when(e.ts)}, ${money(e.price)}, ${e.n}/${e.cap} players, host ${esc(e.hn)}</div></div><button class="btn g" data-a="ov" data-v="${e.id}">Open</button></div>`}
 function openTab(){
   const o=S.ops,mine=o.filter(e=>e.joined||e.mine),rest=o.filter(e=>!(e.joined||e.mine));
   const form=`<h3>Host an open play</h3><input class="w100" id="o_t" placeholder="Title, e.g. Saturday morning open play"><input class="w100" id="o_l" placeholder="Location, e.g. Riverside Courts">
   <textarea class="w100" id="o_d" rows="3" maxlength="300" placeholder="Description: who can join, levels, what to bring"></textarea>
+  <label class="field" for="o_k">Game type</label><select class="w100" id="o_k"><option value="casual">Casual game: does not change ratings</option><option value="ranked">Ranked game: counts toward ratings when you end the session</option></select>
   <label class="field" for="o_w">Starts</label><input class="w100" id="o_w" type="datetime-local" value="${dtLocal(Math.ceil((Date.now()+36e5)/36e5)*36e5)}">
-  <div class="score"><label class="m">Price ₱<br><input class="s" id="o_p" type="number" min="0" value="150"></label><label class="m">Max players<br><input class="s" id="o_c" type="number" min="4" max="60" value="16"></label><label class="m">Courts<br><input class="s" id="o_n" type="number" min="1" max="10" value="2"></label><label class="m">Games each<br><input class="s" id="o_r" type="number" min="1" max="10" value="3"></label><label class="m">Minutes<br><input class="s" id="o_m" type="number" min="30" max="480" value="120"></label></div>
+  <div class="score"><label class="m">Price ₱<br><input class="s" id="o_p" type="number" min="0" value="150"></label><label class="m">Max players<br><input class="s" id="o_c" type="number" min="4" max="60" value="16"></label><label class="m">Courts<br><input class="s" id="o_n" type="number" min="1" max="10" value="2"></label><label class="m">Games each<br><input class="s" id="o_r" type="number" min="1" max="20" value="3"></label><label class="m">Minutes<br><input class="s" id="o_m" type="number" min="30" max="480" value="120"></label></div>
   <input class="w100" id="o_y" placeholder="Your GCash / e-wallet number and name (players pay you)">
-  <p class="m">Players pay you directly and send you their reference number. Mark them paid and they join the games. Free open play: set the price to 0.</p>
+  <p class="m">Ranked needs at least 8 paid players, and ratings update for every game when you end the session. Players pay you directly and send you their reference number. Mark them paid and they join the games. Free open play: set the price to 0.</p>
   <button class="btn big" data-a="opCreate">Publish open play</button><button class="btn g" data-a="hf">Cancel</button>`;
   return `<div class="sheet flat" style="padding-top:14px"><h2>Open play</h2><p class="sub">Host a session or join one. Everyone who has paid is shuffled into games and a queue, and the ranking updates as scores come in.</p>${hostForm?form:`<button class="btn big ball" data-a="hf">Host an open play</button>`}</div>
   ${mine.length?`<div class="sheet"><h2>My open plays</h2>${opts(mine,opRow)}</div>`:""}
@@ -518,10 +524,12 @@ function opView(id){
   else if(mineP&&!mineP.paid)join=`<div class="note warn"><b>Payment needed to play.</b> Send ${money(e.price)} to the host: <b>${esc(e.pay||"ask the host")}</b>. Then send the reference number so the host can confirm you.</div>${mineP.ref?`<p class="m">Reference <b>${esc(mineP.ref)}</b> sent. Waiting for the host to confirm.</p>`:`<input id="or${e.id}" placeholder="E-wallet reference no."><button class="btn" data-a="opRef" data-v="${e.id}">Send reference</button>`}`;
   else if(mineP&&!e.isHost&&mineP.paid)join=`<span class="chip on">You're in</span>`;
   const leave=mineP&&!e.isHost&&(e.st==="open"||live)?`<button class="btn w" data-a="opLeave" data-v="${e.id}">Leave</button>`:"";
-  const info=`<div class="sheet"><h2>${esc(e.title)}</h2><p class="sub"><span class="tag">${OPST[e.st]}</span> Hosted by ${esc(e.hn)}</p>
+  const info=`<div class="sheet"><h2>${esc(e.title)}</h2><p class="sub"><span class="tag">${OPST[e.st]}</span> <span class="chip${e.mode==="ranked"?" on":""}">${e.mode==="ranked"?"Ranked game":"Casual game"}</span> Hosted by ${esc(e.hn)}</p>
+  <p class="m">${e.mode==="ranked"?(done?(e.applied?"Ratings were updated from this session's games.":"This session ended without rated games."):"Scores here count toward club ratings when the host ends the session."):"Casual: scores here never change ratings."}</p>
   ${e.desc?`<p>${br(e.desc)}</p>`:""}<p class="m">${esc(e.loc)}<br>${when(e.ts)}, ${e.dur} min<br>${money(e.price)} per player, ${e.pl.filter(p=>!p.left).length}/${e.cap} joined, ${e.courts} court${e.courts===1?"":"s"}, ${e.rounds} games each</p>${join}${leave}</div>`;
-  const host=e.isHost&&(e.st==="open"||live)?`<div class="sheet"><h2>Host controls</h2>${e.st==="open"?`<p class="sub">${paidN} paid player${paidN===1?"":"s"}. You need at least 4. Latecomers can still join and pay after you start.</p><button class="btn big" data-a="opStart" data-v="${e.id}"${paidN<4?" disabled":""}>Start games</button><button class="btn w" data-a="opCancel" data-v="${e.id}">Cancel open play</button>`
-    :`<p class="sub">Each paid player is scheduled for ${e.rounds} games, shuffled at random. New paid players are added to the queue automatically.</p><button class="btn g" data-a="opShuffle" data-v="${e.id}">Re-randomize queue</button><button class="btn w" data-a="opEnd" data-v="${e.id}">End open play</button>`}</div>`:"";
+  const extra=`<p class="m">${e.courts} court${e.courts===1?"":"s"}, ${e.rounds} games each.</p><button class="btn g" data-a="opCourt" data-v="${e.id}"${e.courts>=10?" disabled":""}>Add a court</button><button class="btn g" data-a="opMore" data-v="${e.id}"${e.rounds>=20?" disabled":""}>Add 1 game each</button>`;
+  const host=e.isHost&&(e.st==="open"||live)?`<div class="sheet"><h2>Host controls</h2>${e.st==="open"?`<p class="sub">${paidN} paid player${paidN===1?"":"s"}. You need at least ${e.mode==="ranked"?8:4}. Latecomers can still join and pay after you start.</p><button class="btn big" data-a="opStart" data-v="${e.id}"${paidN<(e.mode==="ranked"?8:4)?" disabled":""}>Start games</button><button class="btn w" data-a="opCancel" data-v="${e.id}">Cancel open play</button>${extra}`
+    :`<p class="sub">Each paid player is scheduled for ${e.rounds} games, shuffled at random. New paid players are added to the queue automatically.</p><button class="btn g" data-a="opShuffle" data-v="${e.id}">Re-randomize queue</button><button class="btn w" data-a="opEnd" data-v="${e.id}">End open play</button>${extra}`}</div>`:"";
   const scoreIn=g=>{const A=g.p.slice(0,2),B=g.p.slice(2),can=e.isHost||g.p.includes(me);return`<div class="row" style="display:block"><b>Court ${g.c}</b> <span class="m">game #${g.n}</span><div class="court"><div>${team(A)}</div><span class="vs">vs</span><div>${team(B)}</div></div>
   ${can?`<div class="score"><div class="pick"><span class="m">${esc(nm(A[0]))} and ${esc(nm(A[1]))}</span><input id="gsa${g.id}" type="number" inputmode="numeric" min="0" max="40" placeholder="-"></div><div class="pick"><span class="m">${esc(nm(B[0]))} and ${esc(nm(B[1]))}</span><input id="gsb${g.id}" type="number" inputmode="numeric" min="0" max="40" placeholder="-"></div></div><button class="btn" data-a="opScore" data-v="${g.id}">Save score</button>${e.isHost?`<button class="btn w" data-a="opVoid" data-v="${g.id}">Take off court</button>`:""}`:`<p class="m">Playing now.</p>`}</div>`};
   const courts=live?`<div class="sheet"><h2>On court</h2>${next}${on.length?on.map(scoreIn).join(""):`<p class="empty">No game on court right now.</p>`}</div>

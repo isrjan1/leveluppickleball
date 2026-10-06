@@ -219,11 +219,11 @@ function applyResult(u, pl, { A, win, exp, wp, pt, op, ro }) {
   u.last = `${win ? "Won" : "Lost"} ${my}-${th}: rating ${d >= 0 ? "+" : ""}${d.toFixed(3)}${nr ? (rated(u) ? " (now rated)" : " (provisional)") : ""}, +${gx} XP`
     + (gx < xp ? " (XP ceiling: banked)" : "") + (xp < raw ? " (XP reduced: daily cap or repeat group)" : "");
 }
-async function applyPlan(s, pl) {
+async function applyPlan(s, pl, quiet) {
   if (!pl) return;
   const r = await Promise.allSettled(pl.ids.map((id, i) => mutU(s, id, u => applyResult(u, pl, pl.p[i]))));
   r.forEach(x => x.status === "rejected" && console.error("applyPlan", x.reason));
-  await board(s, true).catch(e => console.warn("board refresh", e.message)); // rankings reflect the result immediately
+  if (!quiet) await board(s, true).catch(e => console.warn("board refresh", e.message)); // rankings reflect the result immediately
 }
 // Housekeeping on the match list: auto-validate scores both teams agreed on CONFIRM ago (nobody rejected),
 // void abandoned matches (3h) and stale disputes (12h).
@@ -350,11 +350,11 @@ function opRank(e) {
   return [...m.values()].filter(r => r.g || e.pl.some(x => x.id === r.id && x.paid && !x.left))
     .sort((a, b) => b.w - a.w || (b.pf - b.pa) - (a.pf - a.pa) || b.pf - a.pf || a.n.localeCompare(b.n));
 }
-const opLine = (e, me) => ({ id: e.id, title: e.title, loc: e.loc, ts: e.ts, dur: e.dur, price: e.price, cap: e.cap, n: e.pl.filter(x => !x.left).length, st: e.status, hn: e.hn,
+const opLine = (e, me) => ({ id: e.id, mode: e.mode || "casual", title: e.title, loc: e.loc, ts: e.ts, dur: e.dur, price: e.price, cap: e.cap, n: e.pl.filter(x => !x.left).length, st: e.status, hn: e.hn,
   mine: e.host === me.id, joined: e.pl.some(x => x.id === me.id && !x.left), paid: e.pl.some(x => x.id === me.id && x.paid && !x.left) });
 function opDetail(e, me) {
   const host = e.host === me.id, joined = e.pl.some(x => x.id === me.id && !x.left), done = e.g.filter(g => g.st === "d");
-  return { id: e.id, title: e.title, desc: e.desc, loc: e.loc, ts: e.ts, dur: e.dur, price: e.price, pay: host || joined ? e.pay : "", cap: e.cap, courts: e.courts, rounds: e.rounds,
+  return { id: e.id, mode: e.mode || "casual", applied: !!e.applied, title: e.title, desc: e.desc, loc: e.loc, ts: e.ts, dur: e.dur, price: e.price, pay: host || joined ? e.pay : "", cap: e.cap, courts: e.courts, rounds: e.rounds,
     st: e.status, host: e.host, hn: e.hn, isHost: host, joined, now: Date.now(),
     pl: e.pl.filter(x => !x.left || e.g.some(g => g.p.includes(x.id))).map(x => ({ id: x.id, n: x.n, paid: !!x.paid, left: !!x.left, me: x.id === me.id, ref: host || x.id === me.id ? x.ref || "" : "" })),
     g: [...e.g.filter(g => g.st !== "d"), ...done.slice(-30)].map(g => ({ id: g.id, n: g.n, p: g.p, c: g.court, st: g.st, sa: g.sa, sb: g.sb })),
@@ -694,7 +694,7 @@ async function handle(req, context) {
   if (a === "opCreate") {
     const title = String(b.title || "").trim().slice(0, 60), loc = String(b.loc || "").trim().slice(0, 100), desc = String(b.desc || "").trim().slice(0, 300), pay = String(b.pay || "").trim().slice(0, 120);
     const ts = +b.ts, dur = Math.min(480, Math.max(30, +b.dur | 0 || 120)), price = Math.round(+b.price * 100) || 0;
-    const cap = Math.min(60, Math.max(4, +b.cap | 0 || 16)), courts = Math.min(10, Math.max(1, +b.courts | 0 || 2)), rounds = Math.min(10, Math.max(1, +b.rounds | 0 || 3));
+    const cap = Math.min(60, Math.max(4, +b.cap | 0 || 16)), courts = Math.min(10, Math.max(1, +b.courts | 0 || 2)), rounds = Math.min(20, Math.max(1, +b.rounds | 0 || 3)), mode = b.mode === "ranked" ? "ranked" : "casual";
     if (title.length < 3 || loc.length < 3) return E("Add a title and a location");
     if (!(ts > Date.now() - 36e5 && ts < Date.now() + 60 * 864e5)) return E("Pick a start time within the next 60 days");
     if (!(price >= 0 && price <= 1e6)) return E("Check the price");
@@ -704,7 +704,7 @@ async function handle(req, context) {
       for (let i = list.length; i--;) if (!OPLIVE(list[i]) && !OPRECENT(list[i])) list.splice(i, 1); // housekeeping
       if (list.filter(e => e.host === me.id && OPLIVE(e)).length >= 5) throw new Bad("You already have 5 open plays running");
       if (list.length >= 300) throw new Bad("Too many open plays right now. Try again later.");
-      list.push(made = { id: uid(), host: me.id, hn: me.username, title, desc, loc, ts, dur, price, pay, cap, courts, rounds, status: "open", made: Date.now(), seq: 0,
+      list.push(made = { id: uid(), host: me.id, hn: me.username, mode, title, desc, loc, ts, dur, price, pay, cap, courts, rounds, status: "open", made: Date.now(), seq: 0,
         pl: [{ id: me.id, n: me.username, j: Date.now(), paid: true }], g: [] }); // the host plays too and doesn't pay themselves
     });
     return ok("Open play published", { od: opDetail(made, me) });
@@ -713,7 +713,7 @@ async function handle(req, context) {
     const id = String(b.id || ""), pid = String(b.pid || "");
     if (!ID.test(id)) return E("invalid");
     const hostOnly = e => { if (e.host !== me.id) throw new Bad("Only the host can do that", 403); };
-    let msg = "", e;
+    let msg = "", e, rate = null;
     if (a === "opGet") {
       e = (await jget(s, "op", [])).find(x => x.id === id);
       if (!e) return E("Open play not found", 404);
@@ -766,7 +766,7 @@ async function handle(req, context) {
       e = await mutOp(s, id, e => {
         hostOnly(e);
         if (e.status !== "open") throw new Bad("Already started");
-        if (inPlay(e).length < 4) throw new Bad("You need at least 4 paid players to start");
+        if (inPlay(e).length < (e.mode === "ranked" ? 8 : 4)) throw new Bad(e.mode === "ranked" ? "A ranked open play needs at least 8 paid players" : "You need at least 4 paid players to start");
         e.status = "live"; e.started = Date.now(); opSync(e);
       });
       msg = "Games started. The queue is set.";
@@ -797,13 +797,36 @@ async function handle(req, context) {
         e.g = e.g.filter(z => z !== g); opSync(e);
       });
       msg = "Game removed. The queue was topped up.";
+    } else if (a === "opCourt") { // host: one more court; the next queued game goes on it straight away
+      e = await mutOp(s, id, e => {
+        hostOnly(e);
+        if (e.status !== "open" && e.status !== "live") throw new Bad("This open play is over");
+        if (e.courts >= 10) throw new Bad("10 courts is the maximum");
+        e.courts++; opSync(e);
+      });
+      msg = `Court ${e.courts} added`;
+    } else if (a === "opMore") { // host: one more game for every paid player
+      e = await mutOp(s, id, e => {
+        hostOnly(e);
+        if (e.status !== "open" && e.status !== "live") throw new Bad("This open play is over");
+        if (e.rounds >= 20) throw new Bad("20 games each is the maximum");
+        e.rounds++; opSync(e);
+      });
+      msg = `Everyone now plays ${e.rounds} games`;
     } else if (a === "opEnd") {
       e = await mutOp(s, id, e => {
         hostOnly(e);
         if (e.status !== "live") throw new Bad("Nothing to end");
         e.g = e.g.filter(g => g.st === "d"); e.status = "ended"; e.ended = Date.now();
+        rate = e.mode === "ranked" && !e.applied ? e.g.map(g => ({ id: g.id, p: g.p.slice(), sa: g.sa, sb: g.sb })) : null; // ratings are applied exactly once
+        if (rate) e.applied = true;
       });
       msg = "Open play ended. Final ranking saved.";
+      if (rate) { // ranked: every game now counts toward the club rating, in the order it was played
+        for (const g of rate) await applyPlan(s, await planFinish(s, { id: g.id, p: g.p, sub: {}, status: "playing" }, g.sa, g.sb, [], cfg.tz), true).catch(x => console.error("ranked open play", x));
+        await board(s, true).catch(() => {});
+        msg = `Open play ended. ${rate.length} ranked game${rate.length === 1 ? "" : "s"} counted toward ratings.`;
+      }
     } else if (a === "opCancel") {
       e = await mutOp(s, id, e => {
         hostOnly(e);
