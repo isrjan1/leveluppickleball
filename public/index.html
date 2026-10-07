@@ -68,6 +68,8 @@ p{margin:8px 0}
 /* controls */
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;background:var(--btn);color:var(--btn-text);border:1px solid var(--btn);border-radius:999px;padding:9px 18px;font-weight:600;margin:4px 6px 4px 0;min-height:42px}
 .btn.g{background:transparent;color:var(--text);border-color:var(--line)}
+.or{display:flex;align-items:center;gap:10px;margin:14px 0 10px;color:var(--muted);font-size:13px}.or:before,.or:after{content:"";flex:1;height:1px;background:var(--line)}
+.gb{display:flex;justify-content:center;min-height:44px}
 .btn.w{background:transparent;border-color:var(--down);color:var(--down)}
 .btn.big{width:100%;font:700 20px var(--disp);padding:12px 18px;min-height:52px;margin:6px 0}
 .btn.ball{background:var(--btn);border-color:var(--btn);color:var(--btn-text)}
@@ -334,7 +336,7 @@ body.busy .app [data-a]:not([data-a=tab]):not([data-a=logout]):not([data-a=qrOff
 <div class="app" id="app"></div>
 <script>
 const $=s=>document.querySelector(s);
-let T=localStorage.getItem("pt"),S=null,tab="play",toast="",toastBad=false,authMode="login",qrText="",qrCode="",showQr=false,calDay=null;
+let T=localStorage.getItem("pt"),S=null,tab="play",toast="",toastBad=false,authMode="login",GID=null,gsiOn=false,gpend=null,qrText="",qrCode="",showQr=false,calDay=null;
 let ov=null,cv=null,OD={},C={},hostForm=false,lastOd=null,sending=false;// ov = open play being viewed, cv = friend whose chat is open, OD = open play details, C = chat messages
 let cl=null,CD={},CB=null,CBs=0,GV={},FLY=new Set(),pv="players",clubForm=false,clubEdit=null,hostClub=null,lastClub=null,GC={};// cl = club being viewed, CD = club details, CB = club ranking, pv = Players tab view
 let view=null,P={},PL=null,pq0="";// view = player id when a profile is open; P = profile cache; PL = directory results
@@ -423,6 +425,34 @@ async function auth(){
   finally{await hideLoader();setBusy(false)}
   ciPending();
 }
+// Sign in with Google: the button comes from Google's script; a new Google account then picks a username and goes on to the survey
+function gInit(){
+  if(T||GID!==null)return;GID="";
+  api("config").then(j=>{
+    if(!j.google)return;GID=j.google;draw();
+    const sc=document.createElement("script");sc.src="https://accounts.google.com/gsi/client";sc.async=true;
+    sc.onload=()=>{try{google.accounts.id.initialize({client_id:GID,callback:r=>gLogin(r.credential),ux_mode:"popup"});gsiOn=true;draw()}catch(_){}};
+    document.head.appendChild(sc);
+  }).catch(()=>{});
+}
+function gMount(){const b=document.getElementById("gbtn");if(!b||!gsiOn)return;
+  try{google.accounts.id.renderButton(b,{type:"standard",theme:"outline",size:"large",text:"continue_with",shape:"pill",width:Math.max(200,Math.min(400,b.clientWidth||280))})}catch(_){}}
+async function gLogin(cred,name){
+  if(busy)return;setBusy(true);showLoader(name?"Creating your account":"Signing in with Google");
+  try{
+    const j=await api("google",name?{credential:cred,username:name}:{credential:cred});
+    if(j.needName){gpend={cred,email:j.email,suggest:j.suggest}}
+    else{T=j.token;localStorage.setItem("pt",T);gpend=null;await load()}
+  }catch(e){
+    const m=e.message;
+    if(name&&m==="taken")say("That name is taken. Try another.",1);
+    else if(name&&m==="invalid")say("Use 3-20 characters: letters, numbers, . _ -",1);
+    else{gpend=null;say(/Too many|disabled|offline|reach|took too long|not set up|unavailable/.test(m)?m:"Google sign-in failed. Try again.",1)}
+    draw()
+  }
+  finally{await hideLoader();setBusy(false)}
+  if(!gpend)ciPending();else draw();
+}
 function geo(){
   say("Checking your location...");draw();
   const go=(lat,lng)=>run("checkin",{lat,lng});
@@ -498,6 +528,7 @@ const A={
   logout:async()=>{if(busy)return;setBusy(true);showLoader("Logging out");await new Promise(r=>setTimeout(r,900));
     T=null;S=null;P={};CD={};GC={};CB=null;cl=null;clubEdit=null;PL=null;view=null;showQr=false;calDay=null;tab="play";localStorage.removeItem("pt");draw();scrollTo(0,0);await hideLoader(0);setBusy(false)},auth,
   mode:()=>{authMode=authMode==="login"?"reg":"login";draw()},
+  gname:()=>{if(gpend)gLogin(gpend.cred,v("gu").trim())},gcancel:()=>{gpend=null;draw()},
   prof:x=>{if(x===S.me.id){view=null;tab="me"}else view=x;draw();scrollTo(0,0)},
   back:()=>{if(view)view=null;else if(ov||cv){ov=null;cv=null}else{cl=null;clubEdit=null}draw()},
   hideGuide:()=>{try{localStorage.setItem("gd"+S.me.id,"1")}catch(_){}draw()},
@@ -544,7 +575,11 @@ let sT;document.addEventListener("input",e=>{if(e.target.id==="sa"||e.target.id=
 
 const opts=(l,f)=>l.map(f).join("");
 const ask=m=>!busy&&confirm(m);
-function login(){return `<div class="welcome"><div class="hero">${COURT}<h1 class="logo"><img src="logo.png" alt="PickleUP!" width="320" height="320"></h1><p>Reclub, PickleQ and Much More in one webapp!</p></div>
+function gName(){return `<div class="welcome"><div class="hero">${COURT}<h1 class="logo"><img src="logo.png" alt="PickleUP!" width="320" height="320"></h1><p>Almost there!</p></div>
+<div class="side"><div class="sheet"><h2>Choose your username</h2><p class="sub">Signed in with Google as <b>${esc(gpend.email)}</b>. Pick the name other players will see. Your email stays private.</p>
+<input class="w100" id="gu" placeholder="Username" value="${esc(gpend.suggest||"")}" maxlength="20" autocapitalize="none" autocomplete="username"><p class="m">3-20 characters: letters, numbers, . _ -</p>
+<button class="btn big" data-a="gname">Continue</button><button class="btn g" data-a="gcancel">Use a different account</button></div></div></div>`}
+function login(){if(gpend)return gName();return `<div class="welcome"><div class="hero">${COURT}<h1 class="logo"><img src="logo.png" alt="PickleUP!" width="320" height="320"></h1><p>Reclub, PickleQ and Much More in one webapp!</p></div>
 <div class="side"><div class="sheet"><h2>How it works</h2><ol class="steps">
 <li><b>Join an open play</b> and pay the host.</li>
 <li><b>Play your games.</b> The app sets the courts and the queue.</li>
@@ -552,7 +587,7 @@ function login(){return `<div class="welcome"><div class="hero">${COURT}<h1 clas
 <div class="sheet"><h2>${authMode==="reg"?"Create your player account":"Log in"}</h2>
 <input class="w100" id="u" placeholder="Username" autocapitalize="none" autocomplete="username"><input class="w100" id="p" type="password" placeholder="Password" autocomplete="${authMode==="reg"?"new-password":"current-password"}">
 <button class="btn big" data-a="auth">${authMode==="reg"?"Create account":"Log in"}</button>
-<button class="btn g" data-a="mode">${authMode==="reg"?"I already have an account":"New player? Create an account"}</button></div></div></div>`}
+<button class="btn g" data-a="mode">${authMode==="reg"?"I already have an account":"New player? Create an account"}</button>${GID?`<div class="or"><span>or</span></div><div id="gbtn" class="gb"></div>`:""}</div></div></div>`}
 
 // rating hero, shared by Home, Me and other players' profiles
 function hero(p,{self,back}={}){
@@ -784,7 +819,7 @@ function playersList(){
   const list=PL||S.board.map(u=>({...u}));
   const q=v("ps");
   return `<div class="sheet flat" style="padding-top:14px"><h2>Leaderboard</h2><div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="ps" type="search" placeholder="Search players by name" autocomplete="off"></div></div>
-  <div class="sheet"><h2>${q?"Results":"Club ranking"}</h2><p class="sub">${q?"Rated players first.":"Rated players by doubles rating. Tap anyone to see their profile."}</p>
+  <div class="sheet"><h2>${q?"Results":"Player ranking"}</h2><p class="sub">${q?"Rated players first.":"Rated players by doubles rating. Tap anyone to see their profile."}</p>
   ${list.length?opts(list,(u,i)=>`<button class="row tap" data-a="prof" data-v="${u.id}">${u.r!=null&&!q?`<span class="rk${i<3?" top":""}">${i+1}</span>`:""}${av(u.n)}<div class="g1"><span class="n">${esc(u.n)}${u.me?" (you)":""}</span><div class="m">${esc(levelOf(u.r))}, ${u.w|0}-${u.l|0}</div></div><div class="rv">${fmtR(u.r)}<span>${u.r==null?"provisional":(u.rel|0)+"% reliable"}</span></div></button>`):`<p class="empty">${q?"No players match that name.":"No rated players yet. Ratings appear after a few confirmed games."}</p>`}</div>`;
 }
 function profileView(id){
@@ -899,7 +934,7 @@ function me(){
   ${u.sk?`<div class="sheet"><h2>Skill Trait Gram</h2>${radar(u.sk.v)}<p class="m" style="text-align:center">Self-assessed ${when(u.sk.t)}, scale 1 to 5.${u.role==="player"&&Date.now()-u.sk.t>14*864e5?` <a href="#" data-a="rt" onclick="return false">Retake</a>`:""}</p></div>`:""}
   <div class="sheet"><h2>How your rating works</h2><p class="m">Before each game we predict the score from both teams' ratings. Your rating moves by how much you beat or miss that prediction, so a narrow win against weaker players can lower it and a close loss to stronger players can raise it. New players start NR and become rated after about three games against rated players. Reliability grows when you play often with different partners and opponents.</p></div>
   ${u.role==="player"?`<div class="sheet"><h2>Coach invite</h2><p class="sub">Got a token from the admin? Redeem it to become a certified coach.</p><input id="tk" placeholder="Invite token"><button class="btn g" data-a="redeem">Redeem</button></div>`:""}
-  <div class="sheet"><h2>Password</h2><input id="op" type="password" placeholder="Current password" autocomplete="current-password"><input id="np" type="password" placeholder="New password (6+ characters)" autocomplete="new-password"><button class="btn g" data-a="pw">Change password</button></div>
+  ${S.me.ge?`<div class="sheet"><h2>Sign-in</h2><p class="m">You sign in with Google (${esc(S.me.ge)}). There is no password to manage.</p></div>`:`<div class="sheet"><h2>Password</h2><input id="op" type="password" placeholder="Current password" autocomplete="current-password"><input id="np" type="password" placeholder="New password (6+ characters)" autocomplete="new-password"><button class="btn g" data-a="pw">Change password</button></div>`}
   <div class="sheet"><button class="btn w" data-a="logout">Log out</button></div>`;
 }
 function cal(){
@@ -952,7 +987,7 @@ function draw(poll){
     const d=el.querySelector(".days");if(d)d.scrollLeft=dsl;
     if(fid){const e=document.getElementById(fid);if(e){e.focus({preventScroll:true});try{if(sel)e.setSelectionRange(sel[0],sel[1])}catch(_){}}}};
   const tt=toast?`<div class="toast${toastBad?" bad":""}" role="status" aria-live="polite">${esc(toast)}</div>`:"";
-  if(!T||!S){document.body.classList.remove("nav");el.innerHTML=login()+tt;rest();return}
+  if(!T||!S){document.body.classList.remove("nav");el.innerHTML=login()+tt;rest();gMount();return}
   const r=S.me.role,tabs=[["play","Home"],["players","Leaderboard"],["open","Open Play"],["club","Club"],["friends","Friends"],["cal","Book"],["quests","Quests"],["me","Me"]];
   if(r!=="player")tabs.push(["coach","Coach"]);if(r==="admin")tabs.push(["admin","Admin"]);
   if(!tabs.some(t=>t[0]===tab))tab="play";
@@ -973,7 +1008,7 @@ function draw(poll){
 }
 const pqs=new URLSearchParams(location.search).get("ci");if(pqs){sessionStorage.setItem("ci",pqs);history.replaceState(null,"",location.pathname)}
 setInterval(()=>{if(T&&showQr&&tab==="admin"&&!document.hidden)refreshQr(true)},30000);
-if(T){draw();showLoader("Logging in");load().finally(()=>hideLoader(500))}else draw();
+if(T){draw();showLoader("Logging in");load().finally(()=>hideLoader(500))}else{draw();gInit()}
 setInterval(()=>{if(T&&S&&S.match&&tab==="play"&&!view&&!document.hidden)draw(true)},10000);
 let tick=0;setInterval(()=>{tick++;if(T&&!document.hidden&&navigator.onLine&&!view&&(tab==="play"||tab==="friends"||tab==="open"||tick%3===0))load(true)},15000);
 // chat polls fast (2s) while a conversation is open; open-play details refresh at the old 5s pace
@@ -986,7 +1021,7 @@ document.addEventListener("pointerdown",e=>{if(e.target.closest(".sendb"))e.prev
 document.addEventListener("scroll",e=>{const t=e.target;if(t&&t.classList&&t.classList.contains("msgs")&&nearEnd(t)){const j=document.getElementById(t.id+"j");if(j)j.hidden=true}},true);
 if(window.visualViewport){const vv=window.visualViewport,fit=()=>{document.documentElement.style.setProperty("--vh",vv.height+"px");if(document.body.classList.contains("chatting")){scrollTo(0,0);const m=document.getElementById("cm");if(m)toEnd(m)}};vv.addEventListener("resize",fit);vv.addEventListener("scroll",()=>{if(document.body.classList.contains("chatting"))scrollTo(0,0)});fit()}
 document.addEventListener("keydown",e=>{if(e.key==="Enter"&&T&&S){if((e.target.id==="cx"||e.target.id==="gx")){if(e.shiftKey||e.isComposing)return;e.preventDefault();e.target.id==="cx"?sendMsg():gcSend()}else if(e.target.id==="fn")A.fAddName()}
-  if(e.key==="Enter"&&(!T||!S)&&(e.target.id==="u"||e.target.id==="p"))auth()});
+  if(e.key==="Enter"&&(!T||!S)&&(e.target.id==="u"||e.target.id==="p"))auth();if(e.key==="Enter"&&gpend&&e.target.id==="gu")A.gname()});
 if("serviceWorker"in navigator)navigator.serviceWorker.register("sw.js");
 </script>
 </body>

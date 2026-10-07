@@ -1,6 +1,6 @@
 // Pickleball Level Up API: server-authoritative club rating (2.000-8.000), XP, queue, coach sign-off, RBAC.
 import { getStore } from "@netlify/blobs";
-import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual, scrypt } from "node:crypto";
+import { createHash, createHmac, createPublicKey, createVerify, randomBytes, randomInt, timingSafeEqual, scrypt } from "node:crypto";
 const scr = (p, salt) => new Promise((res, rej) => scrypt(p, salt, 32, (e, k) => (e ? rej(e) : res(k))));
 
 const NAME = /^[A-Za-z0-9_.-]{3,20}$/, ID = /^[a-z0-9]{1,16}$/, TOK = /^[A-Za-z0-9_.-]{1,64}$/;
@@ -62,7 +62,7 @@ async function loadAll(s) {
   const { blobs } = await s.list({ prefix: "u/" });
   return (await Promise.all(blobs.map(b => s.get(b.key, { type: "json" })))).filter(Boolean).map(norm);
 }
-const strip = ({ ph, salt, h, tv, dx, ...u }) => u;
+const strip = ({ ph, salt, h, tv, dx, g, ...u }) => u;
 const tierOf = u => (u.badges.includes("dink_master") ? (u.badges.includes("third_shot_pro") ? 2 : 1) : 0);
 // XP past the tier ceiling is banked (max 500) and released when the next badge is signed off.
 const addXp = (u, n) => { const g = Math.min(n, Math.max(0, CAP[tierOf(u)].xp - u.xp)); u.xp += g; if (g < n) u.bank = Math.min(500, (u.bank | 0) + n - g); };
@@ -154,6 +154,36 @@ async function token(s, u) {
   const p = u.id + "." + (Date.now() + 30 * 864e5) + "." + (u.tv | 0);
   return p + "." + sign(await secret(s), p);
 }
+// ---- Sign in with Google ----
+// The browser gets a Google ID token (a signed JWT). We check its RS256 signature against Google's published keys,
+// plus audience (our client id), issuer, expiry and verified email. Set GOOGLE_CLIENT_ID in Netlify to turn it on.
+let GKEYS = { at: 0, keys: [] };
+async function googleKeys(force) {
+  const age = Date.now() - GKEYS.at;
+  if (GKEYS.keys.length && age < 36e5 && !force) return GKEYS.keys;
+  if (force && age < 6e4) return GKEYS.keys; // a bogus key id can't make us refetch more than once a minute
+  const r = await fetch("https://www.googleapis.com/oauth2/v3/certs").catch(() => null);
+  if (!r || !r.ok) throw new Bad("Google sign-in is unavailable right now. Try again.", 503);
+  GKEYS = { at: Date.now(), keys: (await r.json()).keys || [] };
+  return GKEYS.keys;
+}
+async function googleVerify(cred) {
+  const cid = process.env.GOOGLE_CLIENT_ID;
+  if (!cid) throw new Bad("Google sign-in is not set up", 503);
+  const bad = () => new Bad("Google sign-in failed. Try again.", 401), t = String(cred || ""), p = t.split(".");
+  if (t.length > 4096 || p.length !== 3) throw bad();
+  let head, c;
+  try { head = JSON.parse(Buffer.from(p[0], "base64url").toString()); c = JSON.parse(Buffer.from(p[1], "base64url").toString()); } catch { throw bad(); }
+  if (head.alg !== "RS256" || !head.kid) throw bad();
+  const jwk = (await googleKeys()).find(k => k.kid === head.kid) || (await googleKeys(true)).find(k => k.kid === head.kid);
+  if (!jwk) throw bad();
+  let good = false;
+  try { good = createVerify("RSA-SHA256").update(p[0] + "." + p[1]).verify(createPublicKey({ key: jwk, format: "jwk" }), Buffer.from(p[2], "base64url")); } catch { /* bad key or signature */ }
+  if (!good || c.aud !== cid || !["accounts.google.com", "https://accounts.google.com"].includes(c.iss) || !(c.exp * 1000 > Date.now())) throw bad();
+  if (typeof c.sub !== "string" || !c.sub || c.sub.length > 64 || !(c.email_verified === true || c.email_verified === "true") || typeof c.email !== "string") throw bad();
+  return { sub: c.sub, email: c.email.toLowerCase().slice(0, 120) };
+}
+const nameFrom = e => { const n = String(e || "").split("@")[0].replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 20); return NAME.test(n) && !RESERVED.has(n.toLowerCase()) ? n : ""; };
 async function verify(s, u, pw) {
   if (!u) { await scr(pw, "x".repeat(32)); return false; }
   if (u.h) return same((await scr(pw, u.salt)).toString("hex"), u.h);
@@ -556,6 +586,32 @@ async function handle(req, context) {
     if (n === "admin" && !process.env.ADMIN_PASSWORD && (!u || u.defaultPw)) return E(u ? "The default admin password is disabled for security: set ADMIN_PASSWORD in Netlify environment variables, then redeploy" : "Admin not set up: add ADMIN_PASSWORD in Netlify environment variables, then redeploy", 503);
     if (pw.length < 1 || pw.length > 128 || !(await verify(s, u, pw))) { await Promise.all([hit(s, "u:" + n, 9e5), hit(s, "i:" + ip, 9e5)]); return E("bad credentials", 401); }
     if (u.disabled) return E("This account is disabled", 403);
+    return J({ token: await token(s, u) });
+  }
+  if (a === "config") return J({ google: process.env.GOOGLE_CLIENT_ID || null }); // public: lets the page show the Google button
+  if (a === "google") {
+    if (await locked(s, "gi:" + ip, 30, 9e5)) return E("Too many attempts. Try again in 15 minutes.", 429);
+    let c; try { c = await googleVerify(b.credential); } catch (e) { await hit(s, "gi:" + ip, 9e5); throw e; }
+    const gid = await s.get("g/" + c.sub);
+    let u = gid ? await getU(s, gid) : null;
+    if (gid && !u) await s.delete("g/" + c.sub); // the linked player was deleted: this Google account may sign up again
+    if (u) return u.disabled ? E("This account is disabled", 403) : J({ token: await token(s, u) });
+    // First time with this Google account: they pick a username, then land on the skill survey.
+    const n = String(b.username ?? "").trim();
+    if (!n) return J({ needName: true, email: c.email, suggest: nameFrom(c.email) });
+    if (!NAME.test(n)) return E("invalid");
+    if (RESERVED.has(n.toLowerCase())) return E("taken", 409);
+    if (await locked(s, "r:" + ip, 40, 36e5)) return E("Too many sign-ups from this network", 429);
+    if (await byName(s, n)) return E("taken", 409);
+    await hit(s, "r:" + ip, 36e5);
+    u = newUser(n); u.g = c.sub; u.ge = c.email; // no password: this account signs in with Google
+    if (!(await createUser(s, u))) return E("taken", 409);
+    const w = await s.set("g/" + c.sub, u.id, { onlyIfNew: true });
+    if (w && w.modified === false) { // a parallel request linked this Google account first: drop ours, use theirs
+      await s.delete("name/" + n.toLowerCase()); await s.delete("u/" + u.id);
+      const ex = await getU(s, await s.get("g/" + c.sub));
+      return ex && !ex.disabled ? J({ token: await token(s, ex) }) : E("This account is disabled", 403);
+    }
     return J({ token: await token(s, u) });
   }
   if (a === "register") {

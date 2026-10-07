@@ -10,7 +10,7 @@ export const MIN = 6e4, HOUR = 36e5, DAY = 864e5;
 let n = 0;
 export async function fresh(env = {}, { keepStore = false } = {}) {
   if (!keepStore) { __reset(); offset = 0; } // keepStore = "redeploy": new function instance, same data
-  for (const k of ["ADMIN_PASSWORD", "SESSION_SECRET"]) delete process.env[k];
+  for (const k of ["ADMIN_PASSWORD", "SESSION_SECRET", "GOOGLE_CLIENT_ID"]) delete process.env[k];
   Object.assign(process.env, env);
   const mod = await import(new URL("../../netlify/functions/api.mjs?i=" + ++n, import.meta.url).href);
   const handler = mod.default;

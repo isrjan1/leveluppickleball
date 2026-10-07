@@ -10,7 +10,9 @@ Admin tab: set courts, geofence (lat/lng/radius), invite coaches (token) or set 
 v6.2 notes: passwords are scrypt-hashed server-side (old SHA hashes upgrade on next login), login is rate limited
 (8 tries/15 min per name, 40 per IP), admins can disable users. Set the club time zone in Admin so daily quests reset
 at local midnight. Tier ceilings (Elo/XP caps until a coach signs off the next badge) are the CAP constant in api.mjs.
-Optional env: SESSION_SECRET.
+Optional env: SESSION_SECRET, GOOGLE_CLIENT_ID.
+
+Sign in with Google (optional): in Google Cloud Console create an OAuth client of type "Web application", add your site's URL (and http://localhost:8888 for `netlify dev`) under "Authorized JavaScript origins", then set its client ID as GOOGLE_CLIENT_ID in Netlify and redeploy. Without it the Google button is simply hidden. A new Google account picks a username, then goes to the skill survey; a returning one signs straight in. Google accounts have no password, and only the verified email and Google's account id are stored.
 v6.3: ranked-match XP capped at 150/day; same group replaying within 12h earns 50% then 25% XP (flagged for admin); XP past a tier ceiling is banked (max 500) and released with the next badge.
 v6.4: rotating facility QR check-in (Admin > Check-in screen; players scan with camera or type the code), coach-published lessons/clinics with prices and capacity, cancellations (2h policy), payment tracking (not processing).
 v6.5: prices in pesos; coaches save GCash/e-wallet details, players send a reference number, coach confirms paid.
